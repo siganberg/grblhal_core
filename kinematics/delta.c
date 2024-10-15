@@ -3,24 +3,24 @@
 
   Part of grblHAL
 
-  Copyright (c) 2023 Terje Io
+  Copyright (c) 2023-2024 Terje Io
   Transforms derived from mzavatsky at Trossen Robotics
     https://hypertriangle.com/~alex/delta-robot-tutorial/
   get_cuboid_envelope() derived from javascript code in
     https://www.marginallyclever.com/other/samples/fk-ik-test.html
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "../grbl.h"
@@ -290,7 +290,7 @@ static float *delta_segment_line (float *target, float *position, plan_line_data
         } else if(!pl_data->condition.rapid_motion && distance != 0.0f) {
             float rate_multiplier = get_distance(mpos.values, machine.last_pos.values) / distance;
             pl_data->feed_rate *= rate_multiplier;
-            pl_data->rate_multiplier = 1.0 / rate_multiplier;
+            pl_data->rate_multiplier = 1.0f / rate_multiplier;
         }
 
         memcpy(&machine.last_pos, &mpos, sizeof(coord_data_t));
@@ -514,7 +514,7 @@ static void delta_limits_set_machine_positions (axes_signals_t cycle)
     */
 }
 
-static void delta_go_home (sys_state_t state)
+static void delta_go_home (void *data)
 {
     plan_line_data_t plan_data;
 
@@ -527,7 +527,7 @@ static void delta_go_home (sys_state_t state)
     }
 }
 
-static void delta_homing_complete (bool success)
+static void delta_homing_complete (axes_signals_t cycle, bool success)
 {
     kinematics.transform_from_cartesian = transform_from_cartesian;
 
@@ -542,11 +542,11 @@ static void delta_homing_complete (bool success)
                                 : machine.home_z - settings.homing.pulloff;
 
         if(machine.cfg.flags.home_to_cuboid_top)
-            protocol_enqueue_rt_command(delta_go_home);
+            protocol_enqueue_foreground_task(delta_go_home, NULL);
     }
 
     if(on_homing_completed)
-        on_homing_completed(success);
+        on_homing_completed(cycle, success);
 }
 
 static void cancel_jog (sys_state_t state)

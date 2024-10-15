@@ -3,22 +3,22 @@
 
   Part of grblHAL
 
-  Copyright (c) 2016-2023 Terje Io
+  Copyright (c) 2016-2024 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <math.h>
@@ -84,9 +84,6 @@ typedef struct {
 static amass_t amass;
 #endif
 
-// Message to be output by foreground process
-static char *message = NULL; // TODO: do we need a queue for this?
-
 // Used for blocking new segments being added to the seqment buffer until deceleration starts
 // after probe signal has been asserted.
 static volatile bool probe_asserted = false;
@@ -140,6 +137,7 @@ typedef struct {
 
 static st_prep_t prep;
 
+extern void gc_output_message (char *message);
 
 /*    BLOCK VELOCITY PROFILE DEFINITION
           __________________________
@@ -181,27 +179,11 @@ static st_prep_t prep;
 
 //
 
-// Output message in sync with motion, called by foreground process.
-static void output_message (sys_state_t state)
-{
-    if(message) {
-
-        if(grbl.on_gcode_message)
-            grbl.on_gcode_message(message);
-
-        if(*message)
-            report_message(message, Message_Plain);
-
-        free(message);
-        message = NULL;
-    }
-}
-
 // Callback from delay to deenergize steppers after movement, might been cancelled
-void st_deenergize (void)
+void st_deenergize (void *data)
 {
     if(sys.steppers_deenergize) {
-        hal.stepper.enable(settings.steppers.deenergize);
+        hal.stepper.enable(settings.steppers.energize, true);
         sys.steppers_deenergize = false;
     }
 }
@@ -210,15 +192,10 @@ void st_deenergize (void)
 // enabled. Startup init and limits call this function but shouldn't start the cycle.
 void st_wake_up (void)
 {
-    if(sys.steppers_deenergize) {
-        sys.steppers_deenergize = false;
-//        hal.delay_ms(0, st_deenergize); // Cancel any pending steppers deenergize
-    }
-
     // Initialize stepper data to ensure first ISR call does not step and
     // cancel any pending steppers deenergize
     //st.exec_block = NULL;
-
+    sys.steppers_deenergize = false;
     hal.stepper.wake_up();
 }
 
@@ -232,17 +209,17 @@ ISR_CODE void ISR_FUNC(st_go_idle)(void)
     hal.stepper.go_idle(false);
 
     // Set stepper driver idle state, disabled or enabled, depending on settings and circumstances.
-    if (((settings.steppers.idle_lock_time != 255) || sys.rt_exec_alarm || state == STATE_SLEEP) && state != STATE_HOMING) {
-        if(state == STATE_SLEEP)
-            hal.stepper.enable((axes_signals_t){0});
+    if(((settings.steppers.idle_lock_time != 255) || sys.rt_exec_alarm || state == STATE_SLEEP) && state != STATE_HOMING) {
+        if(settings.steppers.idle_lock_time == 0 || state == STATE_SLEEP)
+            hal.stepper.enable((axes_signals_t){0}, true);
         else {
             // Force stepper dwell to lock axes for a defined amount of time to ensure the axes come to a complete
             // stop and not drift from residual inertial forces at the end of the last movement.
-            sys.steppers_deenergize = true;
-            hal.delay_ms(settings.steppers.idle_lock_time, st_deenergize);
+            task_delete(st_deenergize, NULL); // Cancel any pending steppers deenergize task
+            sys.steppers_deenergize = task_add_delayed(st_deenergize, NULL, settings.steppers.idle_lock_time);
         }
     } else
-        hal.stepper.enable(settings.steppers.idle_lock_time == 255 ? (axes_signals_t){AXES_BITMASK} : settings.steppers.deenergize);
+        hal.stepper.enable(settings.steppers.idle_lock_time == 255 ? (axes_signals_t){AXES_BITMASK} : settings.steppers.energize, true);
 }
 
 
@@ -328,6 +305,10 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
 
                 if((st.dir_change = st.exec_block == NULL || st.dir_outbits.value != st.exec_segment->exec_block->direction_bits.value))
                     st.dir_outbits = st.exec_segment->exec_block->direction_bits;
+
+                if(st.exec_block != NULL && st.exec_block->offset_id != st.exec_segment->exec_block->offset_id)
+                    sys.report.wco = sys.report.force_wco = On; // Do not generate grbl.on_rt_reports_added event!
+
                 st.exec_block = st.exec_segment->exec_block;
                 st.step_event_count = st.exec_block->step_event_count;
                 st.new_block = true;
@@ -351,11 +332,8 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
 
                 // Enqueue any message to be printed (by foreground process)
                 if(st.exec_block->message) {
-                    if(message == NULL) {
-                        message = st.exec_block->message;
-                        protocol_enqueue_rt_command(output_message);
-                    } else
-                        free(st.exec_block->message); //
+                    if(!protocol_enqueue_foreground_task((foreground_task_ptr)gc_output_message, st.exec_block->message))
+                        free(st.exec_block->message);
                     st.exec_block->message = NULL;
                 }
 
@@ -407,16 +385,16 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
          #endif
 
             if(st.exec_segment->update_pwm)
-                st.exec_segment->update_pwm(st.exec_segment->spindle_pwm);
+                st.exec_segment->update_pwm(st.exec_block->spindle, st.exec_segment->spindle_pwm);
             else if(st.exec_segment->update_rpm)
-                st.exec_segment->update_rpm(st.exec_segment->spindle_rpm);
+                st.exec_segment->update_rpm(st.exec_block->spindle, st.exec_segment->spindle_rpm);
         } else {
             // Segment buffer empty. Shutdown.
             st_go_idle();
 
             // Ensure pwm is set properly upon completion of rate-controlled motion.
             if (st.exec_block->dynamic_rpm && st.exec_block->spindle->cap.laser)
-                st.exec_block->spindle->update_pwm(st.exec_block->spindle->pwm_off_value);
+                st.exec_block->spindle->update_pwm(st.exec_block->spindle, st.exec_block->spindle->pwm_off_value);
 
             st.exec_block = NULL;
             system_set_exec_state_flag(EXEC_CYCLE_COMPLETE); // Flag main program for cycle complete
@@ -558,11 +536,6 @@ void st_reset (void)
 {
     if(hal.probe.configure)
         hal.probe.configure(false, false);
-
-    if(message) {
-        free(message);
-        message = NULL;
-    }
 
     // Initialize stepper driver idle state, clear step and direction port pins.
     st_go_idle();
@@ -732,11 +705,13 @@ void st_prep_buffer (void)
 //                st_prep_block->r = pl_block->programmed_rate;
                 st_prep_block->millimeters = pl_block->millimeters;
                 st_prep_block->steps_per_mm = (float)pl_block->step_event_count / pl_block->millimeters;
+                st_prep_block->spindle = pl_block->spindle.hal;
                 st_prep_block->output_commands = pl_block->output_commands;
                 st_prep_block->overrides = pl_block->overrides;
+                st_prep_block->offset_id = pl_block->offset_id;
                 st_prep_block->backlash_motion = pl_block->condition.backlash_motion;
                 st_prep_block->message = pl_block->message;
-                pl_block->message= NULL;
+                pl_block->message = NULL;
 
                 // Initialize segment buffer data for generating the segments.
                 prep.steps_per_mm = st_prep_block->steps_per_mm;
@@ -778,11 +753,11 @@ void st_prep_buffer (void)
                 prep.ramp_type = Ramp_Decel;
                 // Compute decelerate distance relative to end of block.
                 float decel_dist = pl_block->millimeters - inv_2_accel * pl_block->entry_speed_sqr;
-                if (decel_dist < 0.0f) {
+                if(decel_dist < -0.0001f) {
                     // Deceleration through entire planner block. End of feed hold is not in this block.
                     prep.exit_speed = sqrtf(pl_block->entry_speed_sqr - 2.0f * pl_block->acceleration * pl_block->millimeters);
                 } else {
-                    prep.mm_complete = decel_dist; // End of feed hold.
+                    prep.mm_complete = decel_dist < 0.0001f ? 0.0f : decel_dist; // End of feed hold.
                     prep.exit_speed = 0.0f;
                 }
             } else { // [Normal Operation]
@@ -987,8 +962,6 @@ void st_prep_buffer (void)
 
             float rpm;
 
-            st_prep_block->spindle = pl_block->spindle.hal;
-
             if (pl_block->spindle.state.on) {
                 if(pl_block->spindle.css) {
                     float npos = (float)(pl_block->step_event_count - prep.steps_remaining) / (float)pl_block->step_event_count;
@@ -1011,7 +984,7 @@ void st_prep_buffer (void)
                 if(pl_block->spindle.hal->get_pwm != NULL) {
                     prep.current_spindle_rpm = rpm;
                     prep_segment->update_pwm = pl_block->spindle.hal->update_pwm;
-                    prep_segment->spindle_pwm = pl_block->spindle.hal->get_pwm(rpm);
+                    prep_segment->spindle_pwm = pl_block->spindle.hal->get_pwm(pl_block->spindle.hal, rpm);
                 } else {
                     prep_segment->update_rpm = pl_block->spindle.hal->update_rpm;
                     prep.current_spindle_rpm = prep_segment->spindle_rpm = rpm;
@@ -1129,4 +1102,15 @@ float st_get_realtime_rate (void)
             ? prep.current_speed
 #endif
             : 0.0f;
+}
+
+offset_id_t st_get_offset_id (void)
+{
+    plan_block_t *pl_block;
+
+    return st.exec_block
+            ? st.exec_block->offset_id
+            : (sys.holding_state == Hold_Complete && (pl_block = plan_get_current_block())
+                ? pl_block->offset_id
+                : -1);
 }

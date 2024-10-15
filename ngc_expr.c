@@ -53,7 +53,7 @@ typedef enum {
     NGCBinaryOp_LE,
     NGCBinaryOp_GE,
     NGCBinaryOp_GT,
-    NGCBinaryOp_RelationalLast = NGCBinaryOp_GT,
+    NGCBinaryOp_RelationalLast = NGCBinaryOp_GT
 } ngc_binary_op_t;
 
 typedef enum {
@@ -70,7 +70,7 @@ typedef enum {
     NGCUnaryOp_SIN,
     NGCUnaryOp_SQRT,
     NGCUnaryOp_TAN,
-    NGCUnaryOp_Exists,  // Not implemented
+    NGCUnaryOp_Exists
 } ngc_unary_op_t;
 
 /*! \brief Executes the operations: /, MOD, ** (POW), *.
@@ -397,7 +397,7 @@ static status_code_t read_operation (char *line, uint_fast8_t *pos, ngc_binary_o
                 status = Status_ExpressionUknownOp; // Unknown operation name starting with M
             break;
 
-        case 'R':
+        case 'O':
             if (line[*pos] == 'R') {
                 *operation = NGCBinaryOp_NotExclusiveOR;
                 (*pos)++;
@@ -591,7 +591,7 @@ sequentially, the value of #2 would be 10 after the line was executed.
 \param value pointer to float where result is to be stored.
 \returns #Status_OK enum value if processed without error, appropriate \ref status_code_t enum value if not.
 */
-static status_code_t read_parameter (char *line, uint_fast8_t *pos, float *value, bool check)
+status_code_t ngc_read_parameter (char *line, uint_fast8_t *pos, float *value, bool check)
 {
     status_code_t status = Status_BadNumberFormat;
 
@@ -616,8 +616,18 @@ static status_code_t read_parameter (char *line, uint_fast8_t *pos, float *value
                 *arg = '>';
             }
 
-        } else if(read_float(line, pos, value)) {
-            if(ngc_param_get((ngc_param_id_t)*value, value))
+        } else if((status = ngc_read_real_value(line, pos, value)) == Status_OK) {
+
+            uint32_t param = (uint32_t)floorf(*value);
+
+            if((*value - (float)param) > 0.9999f) {
+                param = (uint32_t)ceilf(*value);
+            } else if((*value - (float)param) > 0.0001f)
+                status = Status_BadNumberFormat; // not integer
+
+            if(check && !ngc_param_exists((ngc_param_id_t)param))
+                status = Status_GcodeValueOutOfRange;
+            else if(ngc_param_get((ngc_param_id_t)param, value))
                 status = Status_OK;
         }
     }
@@ -675,19 +685,22 @@ static status_code_t read_unary (char *line, uint_fast8_t *pos, float *value)
 
         else {
 
-            if (operation == NGCUnaryOp_Exists) {
+            if(operation == NGCUnaryOp_Exists) {
 
-                char *arg = &line[++(*pos)], *s;
+                char *arg = &line[++(*pos)], *s = NULL;
 
-                s = arg;
-                while(*s && *s != ']')
-                    s++;
+                if(*arg == '#' && *(arg + 1) == '<') {
+                    arg += 2;
+                    s = arg;
+                    while(*s && *s != ']')
+                        s++;
+                }
 
-                if(*s == ']') {
-                    *s = '\0';
+                if(s && *s == ']' && *(s - 1) == '>') {
+                    *(s - 1) = '\0';
                     *value = ngc_named_param_exists(arg) ? 1.0f : 0.0f;
-                    *s = ']';
-                    *pos = *pos + s - arg + 1;
+                    *(s - 1) = '>';
+                    *pos = *pos + s - arg + 3;
                 } else
                     status = Status_ExpressionSyntaxError;
 
@@ -713,7 +726,7 @@ other readers, depending upon the first character.
 \param value pointer to float where result is to be stored.
 \returns #Status_OK enum value if processed without error, appropriate \ref status_code_t enum value if not.
 */
-static status_code_t read_real_value (char *line, uint_fast8_t *pos, float *value)
+status_code_t ngc_read_real_value (char *line, uint_fast8_t *pos, float *value)
 {
     char c = line[*pos], c1;
 
@@ -727,13 +740,13 @@ static status_code_t read_real_value (char *line, uint_fast8_t *pos, float *valu
     if(c == '[')
         status = ngc_eval_expression(line, pos, value);
     else if(c == '#')
-        status = read_parameter(line, pos, value, false);
+        status = ngc_read_parameter(line, pos, value, false);
     else if(c == '+' && c1 && !isdigit(c1) && c1 != '.') {
         (*pos)++;
-        status = read_real_value(line, pos, value);
+        status = ngc_read_real_value(line, pos, value);
     } else if(c == '-' && c1 && !isdigit(c1) && c1 != '.') {
         (*pos)++;
-        status = read_real_value(line, pos, value);
+        status = ngc_read_real_value(line, pos, value);
         *value = -*value;
     } else if ((c >= 'A') && (c <= 'Z'))
         status = read_unary(line, pos, value);
@@ -768,7 +781,7 @@ status_code_t ngc_eval_expression (char *line, uint_fast8_t *pos, float *value)
 
     status_code_t status;
 
-    if((status = read_real_value(line, pos, values)) != Status_OK)
+    if((status = ngc_read_real_value(line, pos, values)) != Status_OK)
         return status;
 
     if((status = read_operation(line, pos, operators)) != Status_OK)
@@ -776,7 +789,7 @@ status_code_t ngc_eval_expression (char *line, uint_fast8_t *pos, float *value)
 
     for(; operators[0] != NGCBinaryOp_RightBracket;) {
 
-        if((status = read_real_value(line, pos, values + stack_index)) != Status_OK)
+        if((status = ngc_read_real_value(line, pos, values + stack_index)) != Status_OK)
             return status;
 
         if((status = read_operation(line, pos, operators + stack_index)) != Status_OK)
@@ -791,7 +804,7 @@ status_code_t ngc_eval_expression (char *line, uint_fast8_t *pos, float *value)
                     return status;
 
                 operators[stack_index - 1] = operators[stack_index];
-                if((stack_index > 1) && precedence(operators[stack_index - 1] <= precedence(operators[stack_index - 2])))
+                if(stack_index > 1 && precedence(operators[stack_index - 1]) <= precedence(operators[stack_index - 2]))
                     stack_index--;
                 else
                     break;

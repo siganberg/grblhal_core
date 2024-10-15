@@ -28,7 +28,12 @@
     trinamic_init();
 #endif
 
-#if MODBUS_ENABLE && MODBUS_ENABLE & 0x01
+#if PLASMA_ENABLE
+    extern void plasma_init (void);
+    plasma_init();
+#endif
+
+#if MODBUS_ENABLE && (MODBUS_ENABLE & 0x01)
     extern void modbus_rtu_init (void);
     modbus_rtu_init();
 #endif
@@ -36,6 +41,26 @@
 #if CANBUS_ENABLE
     extern void canbus_init (void);
     canbus_init();
+#endif
+
+#if SPINDLE_ENABLE & (1<<SPINDLE_PWM0_CLONE)
+    extern void cloned_spindle_init (void);
+    cloned_spindle_init();
+#endif
+
+#if SPINDLE_ENABLE & (1<<SPINDLE_STEPPER)
+    extern void stepper_spindle_init (void);
+    stepper_spindle_init();
+#endif
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_ONOFF1)|(1<<SPINDLE_ONOFF1_DIR))
+    extern void onoff_spindle_init (void);
+    onoff_spindle_init();
+#endif
+
+#if SPINDLE_ENABLE & (1<<SPINDLE_PWM2)
+    extern void pwm_spindle_init (void);
+    pwm_spindle_init();
 #endif
 
 #if VFD_ENABLE
@@ -93,23 +118,37 @@
     embroidery_init();
 #endif
 
+#if RGB_LED_ENABLE
+    extern void rgb_led_init (void);
+    rgb_led_init();
+#endif
+
     extern void my_plugin_init (void);
     my_plugin_init();
-
-#if SIENCI_LASER_PWM //this needs to go ahead of spindle select so that the laser is registered.
-    extern void pwm_switch_init (void);
-    pwm_switch_init();
-#endif
 
 #if N_SPINDLE > 1
     extern void spindle_select_init(void);
     spindle_select_init();
+  #if SPINDLE_OFFSET == 1
+    extern void spindle_offset_init (void);
+    spindle_offset_init();
+  #endif
 #endif
 
 // Third party plugin definitions.
 // The code for these has to be downloaded from the source and placed in the same folder as driver.c
 // Note: Third party plugins may have more than one implementation, there is no "owner" of plugins listed here.
 //       It is also guaranteed that there will be no implementation in the grblHAL repository of these.
+
+#if PWM_SERVO_ENABLE
+    extern void pwm_servo_init (void);
+    pwm_servo_init();
+#endif
+
+#if BLTOUCH_ENABLE
+    extern void bltouch_init (void);
+    bltouch_init();
+#endif
 
 #if ATC_ENABLE
     extern void atc_init (void);
@@ -136,21 +175,10 @@
     panel_init();
 #endif
 
-#if BOOT_ENTRY_ENABLE
-    extern void boot_entry_init (void);
-    boot_entry_init();
+#if EVENTOUT_ENABLE
+    extern void event_out_init (void);
+    event_out_init();
 #endif
-
-#if AUX_MACROS_ENABLE
-    extern void aux_macros_init (void);
-    aux_macros_init();
-#endif
-
-extern void probe_protect_init (void);
-probe_protect_init();
-
-extern void switchbank_init (void);
-switchbank_init();
 
 // End third party plugin definitions.
 

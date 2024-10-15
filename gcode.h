@@ -3,22 +3,22 @@
 
   Part of grblHAL
 
-  Copyright (c) 2017-2023 Terje Io
+  Copyright (c) 2017-2024 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #ifndef _GCODE_H_
@@ -29,8 +29,11 @@
 #include "spindle_control.h"
 #include "errors.h"
 
+#define MAX_OFFSET_ENTRIES 4 // must be a power of 2
+
 typedef uint32_t tool_id_t;
 typedef uint16_t macro_id_t;
+typedef int8_t offset_id_t;
 
 // Define command actions for within execution-type modal groups (motion, stopping, non-modal). Used
 // internally by the parser to know which command to execute.
@@ -58,6 +61,15 @@ typedef enum {
     NonModal_ClearCoordinateOffset = 112,   //!< 112 - G92.2
     NonModal_RestoreCoordinateOffset = 122  //!< 122 - G92.3
 } non_modal_t;
+
+
+typedef enum {
+    ModalState_NoAction = 0,                //!< 0 - Default, must be zero
+    ModalState_Save = 70,                   //!< 70 - M70
+    ModalState_Invalidate = 71,             //!< 71 - M71
+    ModalState_Restore = 72,                //!< 72 - M72
+    ModalState_SaveAutoRestore = 73,        //!< 73 - M73
+} modal_state_action_t;
 
 /*! Modal Group G1: Motion modes
 
@@ -219,15 +231,15 @@ typedef enum {
 __NOTE:__ Not used by the core, may be used by private user code, drivers or plugins.
 */
 typedef enum {
-    UserMCode_Ignore = 0,               //!< 0  - Default, must be zero
+    UserMCode_Ignore = 0,               //!< 0  - SLB Specific, Default, must be zero
     OpenPNP_SetPinState = 42,           //!< 42 - M42
     UserMCode_Generic1 = 101,           //!< 101 - For private use only
     UserMCode_Generic2 = 102,           //!< 102 - For private use only
     UserMCode_Generic3 = 103,           //!< 103 - For private use only
     UserMCode_Generic4 = 104,           //!< 104 - For private use only
     OpenPNP_GetADCReading = 105,        //!< 105 - M105
-    Fan_On = 106,                       //!< 106 - M106
-    Fan_Off = 107,                      //!< 107 - M107
+    Fan_On = 106,                       //!< 106 - M106, Marlin format
+    Fan_Off = 107,                      //!< 107 - M107, Marlin format
     OpenPNP_GetCurrentPosition = 114,   //!< 114 - M114
     OpenPNP_FirmwareInfo = 115,         //!< 115 - M115
     Trinamic_DebugReport = 122,         //!< 122 - M122, Marlin format
@@ -236,7 +248,9 @@ typedef enum {
     LaserPPI_Enable = 126,              //!< 126 - M126
     LaserPPI_Rate = 127,                //!< 127 - M127
     LaserPPI_PulseLength = 128,         //!< 128 - M128
+    RGB_WriteLEDs = 150,                //!< 150 - M150, Marlin format
     OpenPNP_SetAcceleration = 204,      //!< 204 - M204
+    PWMServo_SetPosition= 280,          //!< 280 - M280, Marlin format
     RGB_Inspection_Light = 356,         //!< 356 - M356
     OpenPNP_FinishMoves = 400,          //!< 400 - M400
     Probe_Deploy = 401,                 //!< 401 - M401, Marlin format
@@ -348,6 +362,26 @@ typedef union {
         float v;
 #endif
     };
+    struct {
+        float m0;
+        float m1;
+        float m2;
+#if N_AXIS > 3
+        float m3;
+#endif
+#if N_AXIS > 4
+        float m4;
+#endif
+#if N_AXIS > 5
+        float m5;
+#endif
+#if N_AXIS > 6
+        float m6;
+#endif
+#if N_AXIS == 8
+        float m7;
+#endif
+    };
 } coord_data_t;
 
 //! Coordinate data including id.
@@ -380,15 +414,36 @@ typedef struct {
     float ijk[3];              //!< I,J,K Axis arc offsets
     float k;                   //!< G33 distance per revolution
     float m;                   //!< G65 argument.
-    float p;                   //!< G10 or dwell parameters
-    float q;                   //!< User defined M-code parameter, M67 output value, G83 delta increment
+    float p;                   //!< G10, 664 or dwell parameters
+    float q;                   //!< User defined M-code parameter, M67 output value, G64 naive CAM tolerance, G83 delta increment
     float r;                   //!< Arc radius or retract position
     float s;                   //!< Spindle speed - single-meaning word
+#ifndef A_AXIS
+    float a;
+#endif
+#ifndef B_AXIS
+    float b;
+#endif
+#ifndef C_AXIS
+    float c;
+#endif
+#if !defined(U_AXIS) && !AXIS_REMAP_ABC2UVW
+    float u;
+#endif
+#if !defined(V_AXIS) && !AXIS_REMAP_ABC2UVW
+    float v;
+#endif
+#if !AXIS_REMAP_ABC2UVW
+    float w;
+#endif
     float xyz[N_AXIS];         //!< X,Y,Z (and A,B,C,U,V when enabled) translational axes
+#if LATHE_UVW_OPTION
+    float uvw[3];              //!< U,V,W lathe mode incremental mode motion
+#endif
     coord_system_t coord_data; //!< Coordinate data
     int32_t $;                 //!< Spindle id - single-meaning word
     int32_t n;                 //!< Line number - single-meaning word
-    uint32_t o;                //!< Subroutine identifier - single-meaning word (not used by the core)
+    uint32_t o;                //!< Subroutine identifier - single-meaning word
     uint32_t h;                //!< Tool number or number of G76 thread spring passes
     tool_id_t t;               //!< Tool selection - single-meaning word
     uint8_t l;                 //!< G10 or canned cycles parameters
@@ -443,9 +498,17 @@ typedef struct {
 } gc_value_ptr_t;
 
 typedef struct {
+    float rpm;                      //!< Spindle speed
     spindle_state_t state;          //!< {M3,M4,M5}
     spindle_rpm_mode_t rpm_mode;    //!< {G96,G97}
-} spindle_mode_t;
+    spindle_css_data_t *css;        //!< Data used for Constant Surface Speed Mode calculations
+    spindle_ptrs_t *hal;            //!< Spindle function pointers etc. Must be last!
+} spindle_t;
+
+typedef struct {
+    spindle_state_t state;          //!< {M3,M4,M5}
+    spindle_rpm_mode_t rpm_mode;    //!< {G96,G97}
+} spindle_modal_t;
 
 // NOTE: When this struct is zeroed, the above defines set the defaults for the system.
 typedef struct {
@@ -459,15 +522,25 @@ typedef struct {
     //< uint8_t cutter_comp;             //!< {G40} NOTE: Don't track. Only default supported.
     tool_offset_mode_t tool_offset_mode; //!< {G43,G43.1,G49}
     coord_system_t coord_system;         //!< {G54,G55,G56,G57,G58,G59,G59.1,G59.2,G59.3}
-    // control_mode_t control;           //!< {G61} NOTE: Don't track. Only default supported.
+#if ENABLE_PATH_BLENDING
+    control_mode_t control;              //!< {G61} NOTE: Don't track. Only default supported.
+#endif
     program_flow_t program_flow;         //!< {M0,M1,M2,M30,M60}
     coolant_state_t coolant;             //!< {M7,M8,M9}
-    spindle_mode_t spindle;              //!< {M3,M4,M5 and G96,G97}
+#if N_SYS_SPINDLE > 1
+    spindle_t spindle[N_SYS_SPINDLE];
+#else
+    spindle_t spindle;                   //!< {M3,M4,M5 and G96,G97}
+#endif
     gc_override_flags_t override_ctrl;   //!< {M48,M49,M50,M51,M53,M56}
     cc_retract_mode_t retract_mode;      //!< {G98,G99}
     bool scaling_active;                 //!< {G50,G51}
     bool canned_cycle_active;
     float spline_pq[2];                  //!< {G5}
+#if NGC_PARAMETERS_ENABLE
+    bool auto_restore;
+    float feed_rate;                     //!< {F} NOTE: only set when saving modal state
+#endif
 } gc_modal_t;
 
 //! Data for canned cycles.
@@ -475,7 +548,6 @@ typedef struct {
     float xyz[3];
     float delta;
     float dwell;
-    float prev_position;
     float retract_position; //!< Canned cycle retract position
     bool rapid_retract;
     bool spindle_off;
@@ -510,15 +582,9 @@ typedef struct {
 typedef struct {
     float offset[N_AXIS];   //!< Tool offset
     float radius;           //!< Radius of tool (currently unsupported)
+// TODO: add float max_rpm; ?
     tool_id_t tool_id;      //!< Tool number
 } tool_data_t;
-
-typedef struct {
-    float rpm;                  //!< Spindle speed
-    spindle_state_t state;
-    spindle_css_data_t *css;    //!< Data used for Constant Surface Speed Mode calculations
-    spindle_ptrs_t *hal;
-} spindle_t;
 
 /*! \brief Parser state
 
@@ -526,14 +592,17 @@ typedef struct {
 typedef struct {
     gc_modal_t modal;
     gc_canned_t canned;
-    spindle_t spindle;                  //!< RPM
+    spindle_t *spindle;                 //!< Last referenced spindle
     float feed_rate;                    //!< Millimeters/min
     float distance_per_rev;             //!< Millimeters/rev
     float position[N_AXIS];             //!< Where the interpreter considers the tool to be at this point in the code
-    //  float blending_tolerance;       //!< Motion blending tolerance
+#if ENABLE_PATH_BLENDING
+    float path_tolerance;               //!< Path blending tolerance
+    float cam_tolerance;                //!< Naive CAM tolerance
+#endif
     int32_t line_number;                //!< Last line number sent
     tool_id_t tool_pending;             //!< Tool to be selected on next M6
-#if N_TOOLS && NGC_EXPRESSIONS_ENABLE
+#if NGC_EXPRESSIONS_ENABLE
     uint32_t g43_pending;               //!< Tool offset to be selected on next M6, for macro ATC
 #endif
     bool file_run;                      //!< Tracks % command
@@ -542,6 +611,8 @@ typedef struct {
     bool tool_change;
     bool skip_blocks;                   //!< true if skipping conditional blocks
     status_code_t last_error;           //!< last return value from parser
+    offset_id_t offset_id;              //!< id(x) of last G92 coordinate offset (into circular buffer)
+    coord_data_t offset_queue[MAX_OFFSET_ENTRIES];
     //!< The following variables are not cleared upon warm restart when COMPATIBILITY_LEVEL <= 1
     bool g92_coord_offset_applied;      //!< true when G92 offset applied
     float g92_coord_offset[N_AXIS];     //!< Retains the G92 coordinate offset (work coordinates) relative to
@@ -557,11 +628,6 @@ typedef struct {
 } scale_factor_t;
 
 extern parser_state_t gc_state;
-#if N_TOOLS
-extern tool_data_t tool_table[N_TOOLS + 1];
-#else
-extern tool_data_t tool_table;
-#endif
 
 /*! \brief Parser block structure.
 
@@ -571,14 +637,20 @@ It will also be passed to mc_jog_execute() and any user M-code validation and ex
 typedef struct {
     non_modal_t non_modal_command;      //!< Non modal command
     override_mode_t override_command;   //!< Override command TODO: add to non_modal above?
-    user_mcode_t user_mcode;            //!< Set > #UserMCode_Ignore if a user M-code is found.
+    user_mcode_t user_mcode;            //!< Set > 0 if a user M-code is found.
     bool user_mcode_sync;               //!< Set to \a true by M-code validation handler if M-code is to be executed after synchronization.
     gc_modal_t modal;                   //!< The current modal state is copied here before parsing starts.
+    spindle_modal_t spindle_modal;
     gc_values_t values;                 //!< Parameter values for block.
     parameter_words_t words;            //!< Bitfield for tracking found parameter values.
     output_command_t output_command;    //!< Details about M62-M68 output command to execute if present in block.
     uint32_t arc_turns;                 //
-    spindle_ptrs_t *spindle;            //!< Spindle to control, NULL for all
+#if NGC_PARAMETERS_ENABLE
+    modal_state_action_t state_action;  //!< M70-M73 modal state action
+#endif
+#if N_AXIS > 3
+    axes_signals_t rotary_wrap;
+#endif
 } parser_block_t;
 
 // Initialize the parser
@@ -606,14 +678,19 @@ axes_signals_t gc_get_g51_state (void);
 float *gc_get_scaling (void);
 
 // Get current axis offset.
-float gc_get_offset (uint_fast8_t idx);
+float gc_get_offset (uint_fast8_t idx, bool real_time);
 
-spindle_ptrs_t *gc_spindle_get (void);
+spindle_t *gc_spindle_get (spindle_num_t spindle);
 
 void gc_spindle_off (void);
-void gc_coolant_off (void);
+void gc_coolant (coolant_state_t state);
 
 void gc_set_tool_offset (tool_offset_mode_t mode, uint_fast8_t idx, int32_t offset);
 plane_t *gc_get_plane_data (plane_t *plane, plane_select_t select);
 
+#if NGC_PARAMETERS_ENABLE
+parameter_words_t gc_get_g65_arguments (void);
+bool gc_modal_state_restore (gc_modal_t *copy);
 #endif
+
+#endif // _GCODE_H_

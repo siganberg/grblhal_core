@@ -3,20 +3,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2023 Terje Io
+  Copyright (c) 2020-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 /*! \file
@@ -177,8 +177,19 @@ the speed is not limited to 115200 baud. An example is native USB streaming.
 #define CHECK_MODE_DELAY 0 // ms
 #endif
 
+/*! \def DEBOUNCE_DELAY
+\brief
+When > 0 adds a short delay when an input changes state to avoid switch bounce
+or EMI triggering the related interrupt falsely or too many times.
+*/
+#if !defined DEBOUNCE_DELAY || defined __DOXYGEN__
+#define DEBOUNCE_DELAY 40 // ms
+#endif
+
 // ---------------------------------------------------------------------------------------
 // ADVANCED CONFIGURATION OPTIONS:
+
+#define ENABLE_PATH_BLENDING Off // Do NOT enable unless working on adding this feature!
 
 // Enables code for debugging purposes. Not for general use and always in constant flux.
 //#define DEBUG // Uncomment to enable. Default disabled.
@@ -475,11 +486,11 @@ non-volatile storage until the controller is in IDLE state.
 
 /*! \def TOOLSETTER_RADIUS
 \brief
-The grbl.on_probe_fixture event handler is called by the default tool change algorithm when probing at G59.3.
+The grbl.on_probe_toolsetter event handler is called by the default tool change algorithm when probing at G59.3.
 In addition it will be called on a "normal" probe sequence if the XY position is
 within the radius of the G59.3 position defined below.
 Change if the default value of 5mm is not suitable or set it to 0.0f to disable.
-<br>__NOTE:__ A grbl.on_probe_fixture event handler is not installed by the core, it has to be provided
+<br>__NOTE:__ A grbl.on_probe_toolsetter event handler is not installed by the core, it has to be provided
 by a driver or a plugin.
 */
 #if !defined TOOLSETTER_RADIUS || defined __DOXYGEN__
@@ -493,7 +504,7 @@ by a driver or a plugin.
 #if COMPATIBILITY_LEVEL == 0 || defined __DOXYGEN__
 /*! \def N_TOOLS
 \brief
-Number of tools in tool table, edit to enable (max. 16 allowed)
+Number of tools in tool table, edit to enable (max. 32 allowed)
 */
 #if !defined N_TOOLS || defined __DOXYGEN__
 #define N_TOOLS 0
@@ -502,12 +513,20 @@ Number of tools in tool table, edit to enable (max. 16 allowed)
 
 /*! \def NGC_EXPRESSIONS_ENABLE
 \brief
-Set to \ref On or 1 to enable experimental support for parameters and expressions.
+Set to \ref On or 1 to enable experimental support for expressions.
 
 Some LinuxCNC extensions are supported, conditionals and subroutines are not.
 */
 #if !defined NGC_EXPRESSIONS_ENABLE || defined __DOXYGEN__
 #define NGC_EXPRESSIONS_ENABLE Off
+#endif
+
+/*! \def NGC_PARAMETERS_ENABLE
+\brief
+Set to \ref On or 1 to enable experimental support for parameters.
+*/
+#if !defined NGC_PARAMETERS_ENABLE || defined __DOXYGEN__
+#define NGC_PARAMETERS_ENABLE On
 #endif
 
 /*! \def NGC_N_ASSIGN_PARAMETERS_PER_BLOCK
@@ -516,6 +535,14 @@ Maximum number of parameters allowed in a block.
 */
 #if (NGC_EXPRESSIONS_ENABLE && !defined NGC_N_ASSIGN_PARAMETERS_PER_BLOCK) || defined __DOXYGEN__
 #define NGC_N_ASSIGN_PARAMETERS_PER_BLOCK 10
+#endif
+
+/*! \def LATHE_UVW_OPTION
+\brief
+Allow use of UVW axis words for non-modal relative lathe motion.
+*/
+#if !defined LATHE_UVW_OPTION || defined __DOXYGEN__
+#define LATHE_UVW_OPTION Off
 #endif
 
 // Max number of entries in log for PID data reporting, to be used for tuning
@@ -669,6 +696,16 @@ The following codes are defined:
 #define DEFAULT_REPORT_RUN_SUBSTATE Off // Default off. Set to \ref On or 1 to enable.
 #endif
 
+/*! \def DEFAULT_REPORT_WHEN_HOMING
+\brief
+Enabling this setting enables status reporting while homing.
+<br>__NOTE:__ Enabling this option may break senders.
+\internal Bit 12 in settings.status_report.
+*/
+#if !defined DEFAULT_REPORT_WHEN_HOMING || defined __DOXYGEN__
+#define DEFAULT_REPORT_WHEN_HOMING Off // Default off. Set to \ref On or 1 to enable.
+#endif
+
 ///@}
 
 /*! @name $11 - Setting_JunctionDeviation
@@ -811,7 +848,7 @@ having trouble keeping up with planning new incoming motions as they are execute
  */
 ///@{
 #if !defined DEFAULT_PLANNER_BUFFER_BLOCKS || defined __DOXYGEN__
-#define DEFAULT_PLANNER_BUFFER_BLOCKS 35
+#define DEFAULT_PLANNER_BUFFER_BLOCKS 100
 #endif
 ///@}
 
@@ -918,6 +955,9 @@ not throw an alarm message.
 #endif
 #if !defined DEFAULT_CHECK_LIMITS_AT_INIT || defined __DOXYGEN__
 #define DEFAULT_CHECK_LIMITS_AT_INIT Off
+#endif
+#if !defined DEFAULT_HARD_LIMITS_DISABLE_FOR_ROTARY || defined __DOXYGEN__
+#define DEFAULT_HARD_LIMITS_DISABLE_FOR_ROTARY Off
 #endif
 
 /*! @name Group_Limits_DualAxis
@@ -1075,6 +1115,14 @@ Default value is 0, meaning spindle sync is disabled
 #endif
 ///@}
 
+/*! @name $395 - Setting_SpindleType
+*/
+///@{
+#if !defined DEFAULT_SPINDLE || defined __DOXYGEN__
+#define DEFAULT_SPINDLE SPINDLE_PWM0 // Spindle number from spindle_control.h
+#endif
+///@}
+
 // Closed loop spindle settings (Group_Spindle_ClosedLoop)
 
 // $9 - Setting_SpindlePWMOptions
@@ -1104,7 +1152,7 @@ Defines the parameters for the first entry in the spindle RPM linearization tabl
 */
 ///@{
 #if !defined DEFAULT_RPM_POINT01 || defined __DOXYGEN__
-#define DEFAULT_RPM_POINT01 DEFAULT_SPINDLE_RPM_MIN  // Don not change! Set DEFAULT_SPINDLE_RPM_MIN instead.
+#define DEFAULT_RPM_POINT01 NAN // DEFAULT_SPINDLE_RPM_MIN  // Replace NAN with DEFAULT_SPINDLE_RPM_MIN to enable.
 #endif
 #if !defined DEFAULT_RPM_LINE_A1 || defined __DOXYGEN__
 #define DEFAULT_RPM_LINE_A1 3.197101e-03f
@@ -1119,7 +1167,7 @@ Defines the parameters for the second entry in the spindle RPM linearization tab
 */
 ///@{
 #if !defined DEFAULT_RPM_POINT12 || defined __DOXYGEN__
-#define DEFAULT_RPM_POINT12 9627.8  // Set to a float constant to enable.
+#define DEFAULT_RPM_POINT12 NAN  // Change NAN to a float constant to enable.
 #endif
 #if !defined DEFAULT_RPM_LINE_A2 || defined __DOXYGEN__
 #define DEFAULT_RPM_LINE_A2  1.722950e-2f
@@ -1134,7 +1182,7 @@ Defines the parameters for the third entry in the spindle RPM linearization tabl
 */
 ///@{
 #if !defined DEFAULT_RPM_POINT23 || defined __DOXYGEN__
-#define DEFAULT_RPM_POINT23 10813.9  // Set to a float constant to enable.
+#define DEFAULT_RPM_POINT23 NAN  // Change NAN to a float constant to enable.
 #endif
 #if !defined DEFAULT_RPM_LINE_A3 || defined __DOXYGEN__
 #define DEFAULT_RPM_LINE_A3 5.901518e-02f
@@ -1149,7 +1197,7 @@ Defines the parameters for the fourth entry in the spindle RPM linearization tab
 */
 ///@{
 #if !defined DEFAULT_RPM_POINT34 || defined __DOXYGEN__
-#define DEFAULT_RPM_POINT34 NAN  // Set to a float constant to enable.
+#define DEFAULT_RPM_POINT34 NAN  // Change NAN to a float constant to enable.
 #endif
 #if !defined DEFAULT_RPM_LINE_A4 || defined __DOXYGEN__
 #define DEFAULT_RPM_LINE_A4  1.203413e-01f
@@ -1304,6 +1352,16 @@ to a reset during motion.
 #endif
 ///@}
 
+/*! /def DEFAULT_HOMING_USE_LIMIT_SWITCHES
+\brief
+Enable this setting to force using limit switches for homing.
+\internal Bit 7 in settings.homing.flags.
+*/
+#if !defined DEFAULT_HOMING_USE_LIMIT_SWITCHES || defined __DOXYGEN__
+#define DEFAULT_HOMING_USE_LIMIT_SWITCHES Off // Default disabled. Set to \ref On or 1 to enable.
+#endif
+///@}
+
 /*! @name $23 - Setting_HomingDirMask
 \ref axismask controlling the direction of movement during homing.
 Unset bits in the mask results in movement in positive direction.
@@ -1431,6 +1489,20 @@ greater.
 #define DEFAULT_HOMING_CYCLE_5 0                        // OPTIONAL: Uncomment and add axes mask to enable
 #endif
 ///@}
+
+/*! @name $671 - Setting_HomePinsInvertMask
+By default, grblHAL sets all input pins to normal-low operation with their internal pull-up resistors
+enabled. This simplifies the wiring for users by requiring only a normally closed (NC) switch connected
+to ground. It is _not_ recommended to use normally-open (NO) switches as this increases the risk
+of electrical noise or cable breaks spuriously triggering the inputs. If normally-open (NO) switches
+are used the logic of the input signals should be be inverted with the \ref axismask below.
+*/
+///@{
+#if !defined DEFAULT_HOME_SIGNALS_INVERT_MASK || defined __DOXYGEN__
+#define DEFAULT_HOME_SIGNALS_INVERT_MASK 0 // Set to -1 or AXES_BITMASK to invert for all axes
+#endif
+///@}
+
 
 // Probing settings (Group_Probing)
 
@@ -1636,7 +1708,7 @@ since the spindle may pull down the Z due to its weight.
 
 /*! @name $2 - Setting_StepInvertMask
 \brief \ref axismask controlling the polarity of the step signals. The default is positive pulses.
-Set this value to -1 to invert for all steppers or specify which by mask.
+Set this value to -1 or AXES_BITMASK to invert for all steppers or specify which by mask.
 */
 ///@{
 #if !defined DEFAULT_STEP_SIGNALS_INVERT_MASK || defined __DOXYGEN__
@@ -1647,7 +1719,7 @@ Set this value to -1 to invert for all steppers or specify which by mask.
 /*! @name $3 - Setting_DirInvertMask
 \brief \ref axismask controling the polarity of the stepper direction signals. The default
 is positive voltage for motions in negative direction.
-Set this value to -1 to invert for all steppers or specify which by mask.*/
+Set this value to -1 or AXES_BITMASK to invert for all steppers or specify which by mask.*/
 ///@{
 #if !defined DEFAULT_DIR_SIGNALS_INVERT_MASK || defined __DOXYGEN__
 #define DEFAULT_DIR_SIGNALS_INVERT_MASK 0
@@ -1656,6 +1728,8 @@ Set this value to -1 to invert for all steppers or specify which by mask.*/
 
 /*! @name $4 - Setting_InvertStepperEnable
 \brief \ref axismask for inverting the polarity of the stepper enable signal(s).
+
+Set this value to -1 or AXES_BITMASK to invert for all steppers or specify which by mask.
 <br>__NOTE:__ If \ref COMPATIBILITY_LEVEL > 2 this setting reverts to the legacy
               Grbl behaviour where 0 inverts the enable signals for all drivers
               and 1 does not.
@@ -1665,9 +1739,7 @@ Set this value to -1 to invert for all steppers or specify which by mask.*/
 */
 ///@{
 #if !defined DEFAULT_ENABLE_SIGNALS_INVERT_MASK || defined __DOXYGEN__
-#define DEFAULT_ENABLE_SIGNALS_INVERT_MASK (X_AXIS_BIT|Y_AXIS_BIT|Z_AXIS_BIT) // Default disabled. Uncomment to enable.
-#else
-//#define DEFAULT_ENABLE_SIGNALS_INVERT_MASK 1
+#define DEFAULT_ENABLE_SIGNALS_INVERT_MASK AXES_BITMASK
 #endif
 ///@}
 
@@ -1726,6 +1798,36 @@ Timezone offset from UTC in hours, allowed range is -12.0 - 12.0.
 ///@{
 #if !defined DEFAULT_TIMEZONE_OFFSET || defined __DOXYGEN__
 #define DEFAULT_TIMEZONE_OFFSET 0.0f
+#endif
+///@}
+
+/*! @name $536 - Setting_RGB_StripLengt0
+Number of LEDs in NeoPixel/WS2812 strip 1.
+*/
+///@{
+#if !defined DEFAULT_RGB_STRIP0_LENGTH || defined __DOXYGEN__
+#define DEFAULT_RGB_STRIP0_LENGTH 0
+#endif
+///@}
+
+/*! @name $537 - Setting_RGB_StripLengt1
+Number of LEDs in NeoPixel/WS2812 strip 2.
+*/
+///@{
+#if !defined DEFAULT_RGB_STRIP1_LENGTH || defined __DOXYGEN__
+#define DEFAULT_RGB_STRIP1_LENGTH 0
+#endif
+///@}
+
+/*! @name $538 - Setting_RotaryWrap
+Enable fast return to G28 position for rotary axes by \ref axismask.
+Use:
+G91G28<axisletter>0
+G90
+*/
+///@{
+#if !defined DEFAULT_AXIS_ROTARY_WRAP_MASK || defined __DOXYGEN__
+#define DEFAULT_AXIS_ROTARY_WRAP_MASK 0
 #endif
 ///@}
 
@@ -1855,28 +1957,28 @@ __NOTE:__ Must be a positive values.
  */
 ///@{
 #if !defined DEFAULT_X_CURRENT || defined __DOXYGEN__
-#define DEFAULT_X_CURRENT 0.0 // mA
+#define DEFAULT_X_CURRENT 500.0f // mA RMS
 #endif
 #if !defined DEFAULT_Y_CURRENT || defined __DOXYGEN__
-#define DEFAULT_Y_CURRENT 0.0 // mA
+#define DEFAULT_Y_CURRENT 500.0f // mA RMS
 #endif
 #if !defined DEFAULT_Z_CURRENT || defined __DOXYGEN__
-#define DEFAULT_Z_CURRENT 0.0 // mA
+#define DEFAULT_Z_CURRENT 500.0f // mA RMS
 #endif
 #if (defined A_AXIS && !defined DEFAULT_A_CURRENT) || defined __DOXYGEN__
-#define DEFAULT_A_CURRENT 0.0 // mA
+#define DEFAULT_A_CURRENT 500.0f // mA RMS
 #endif
 #if (defined B_AXIS && !defined DEFAULT_B_CURRENT) || defined __DOXYGEN__
-#define DEFAULT_B_CURRENT 0.0 // mA
+#define DEFAULT_B_CURRENT 500.0f // mA RMS
 #endif
 #if (defined C_AXIS && !defined DEFAULT_C_CURRENT) || defined __DOXYGEN__
-#define DEFAULT_C_CURRENT 0.0 // mA
+#define DEFAULT_C_CURRENT 500.0f // mA RMS
 #endif
 #if (defined U_AXIS && !defined DEFAULT_U_CURRENT) || defined __DOXYGEN__
-#define DEFAULT_U_CURRENT 0.0 // mA
+#define DEFAULT_U_CURRENT 500.0f // mA RMS
 #endif
 #if (defined V_AXIS && !defined DEFAULT_V_CURRENT) || defined __DOXYGEN__
-#define DEFAULT_V_CURRENT 0.0 // mA
+#define DEFAULT_V_CURRENT 500.0f // mA RMS
 #endif
 ///@}
 
@@ -1887,9 +1989,9 @@ __NOTE:__ Must be a positive values.
 #undef N_TOOLS
 #endif
 
-#if defined(N_TOOLS) && N_TOOLS > 16
+#if defined(N_TOOLS) && N_TOOLS > 32
 #undef N_TOOLS
-#define N_TOOLS 16
+#define N_TOOLS 32
 #endif
 
 #if N_SYS_SPINDLE > N_SPINDLE
@@ -1907,6 +2009,11 @@ __NOTE:__ Must be a positive values.
 #define N_SYS_SPINDLE 8
 #endif
 
+#if NGC_EXPRESSIONS_ENABLE && !NGC_PARAMETERS_ENABLE
+#undef NGC_PARAMETERS_ENABLE
+#define NGC_PARAMETERS_ENABLE On
+#endif
+
 #if (REPORT_WCO_REFRESH_BUSY_COUNT < REPORT_WCO_REFRESH_IDLE_COUNT)
   #error "WCO busy refresh is less than idle refresh."
 #endif
@@ -1922,6 +2029,12 @@ __NOTE:__ Must be a positive values.
 
 #if DEFAULT_LASER_MODE && DEFAULT_LATHE_MODE
 #error "Cannot enable laser and lathe mode at the same time!"
+#endif
+
+#if LATHE_UVW_OPTION && (N_AXIS > 6 || AXIS_REMAP_ABC2UVW)
+#warning "Cannot enable lathe UVW option when N_AXIS > 6 or ABC words are remapped!"
+#undef LATHE_UVW_OPTION
+#define LATHE_UVW_OPTION Off
 #endif
 
 #if DEFAULT_CONTROL_SIGNALS_INVERT_MASK < 0

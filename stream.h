@@ -5,18 +5,18 @@
 
   Copyright (c) 2019-2023 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 /*! \file
@@ -325,6 +325,10 @@ bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_
 */
 bool stream_mpg_enable (bool on);
 
+void stream_mpg_set_mode (void *data);
+
+bool stream_mpg_check_enable (char c);
+
 bool stream_buffer_all (char c);
 
 bool stream_tx_blocking (void);
@@ -341,19 +345,33 @@ bool stream_connect_instance (uint8_t instance, uint32_t baud_rate);
 
 void stream_disconnect (const io_stream_t *stream);
 
+bool stream_connected (void);
+
 const io_stream_t *stream_get_base (void);
 
 io_stream_flags_t stream_get_flags (io_stream_t stream);
 
 const io_stream_t *stream_null_init (uint32_t baud_rate);
 
-io_stream_t const *stream_open_instance (uint8_t instance, uint32_t baud_rate, stream_write_char_ptr rx_handler);
+io_stream_t const *stream_open_instance (uint8_t instance, uint32_t baud_rate, stream_write_char_ptr rx_handler, const char *description);
 
+bool stream_set_description (const io_stream_t *stream, const char *description);
+
+void debug_printf(const char *fmt, ...);
+
+#if defined(DEBUG) || defined(DEBUGOUT)
+#define DEBUG_PRINT 1
 #ifdef DEBUGOUT
 void debug_write (const char *s);
 void debug_writeln (const char *s);
 bool debug_stream_init (void);
 #endif
+#else
+#define DEBUG_PRINT 0
+#endif
+
+#define debug_print(fmt, ...) \
+   do { if(DEBUG_PRINT) debug_printf(fmt, __VA_ARGS__); } while(0)
 
 #ifdef __cplusplus
 }

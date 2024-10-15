@@ -1,24 +1,24 @@
 /*
-  protocol.c - controls Grbl execution protocol and procedures
+  protocol.c - controls grblHAL execution protocol and procedures
 
   Part of grblHAL
 
-  Copyright (c) 2017-2023 Terje Io
+  Copyright (c) 2017-2024 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <stdlib.h>
@@ -35,7 +35,7 @@
 #include "machine_limits.h"
 
 #ifndef RT_QUEUE_SIZE
-#define RT_QUEUE_SIZE 8 // must be a power of 2
+#define RT_QUEUE_SIZE 16 // must be a power of 2
 #endif
 
 // Define line flags. Includes comment type tracking and line overflow detection.
@@ -50,9 +50,14 @@ typedef union {
 } line_flags_t;
 
 typedef struct {
+    void *data;
+    fg_task_ptr task;
+} delayed_task_t;
+
+typedef struct {
     volatile uint_fast8_t head;
     volatile uint_fast8_t tail;
-    on_execute_realtime_ptr fn[RT_QUEUE_SIZE];
+    delayed_task_t task[RT_QUEUE_SIZE];
 } realtime_queue_t;
 
 static uint_fast16_t char_counter = 0;
@@ -60,15 +65,16 @@ static char line[LINE_BUFFER_SIZE]; // Line to be executed. Zero-terminated.
 static char xcommand[LINE_BUFFER_SIZE];
 static bool keep_rt_commands = false;
 static realtime_queue_t realtime_queue = {0};
+static on_execute_realtime_ptr on_execute_delay;
 
+static void protocol_execute_rt_commands (sys_state_t state);
 static void protocol_exec_rt_suspend (sys_state_t state);
-static void protocol_execute_rt_commands (void);
 
 // add gcode to execute not originating from normal input stream
 bool protocol_enqueue_gcode (char *gcode)
 {
     bool ok = xcommand[0] == '\0' &&
-               (state_get() == STATE_IDLE || (state_get() & (STATE_JOG|STATE_TOOL_CHANGE))) &&
+               (state_get() == STATE_IDLE || (state_get() & (STATE_ALARM|STATE_JOG|STATE_TOOL_CHANGE))) &&
                  bit_isfalse(sys.rt_exec_state, EXEC_MOTION_CANCEL);
 
     if(ok && gc_state.file_run)
@@ -78,6 +84,16 @@ bool protocol_enqueue_gcode (char *gcode)
         strcpy(xcommand, gcode);
 
     return ok;
+}
+
+static void protocol_on_execute_delay (sys_state_t state)
+{
+    if(sys.rt_exec_state & EXEC_RT_COMMAND) {
+        system_clear_exec_state_flag(EXEC_RT_COMMAND);
+        protocol_execute_rt_commands(0);
+    }
+
+    on_execute_delay(state);
 }
 
 static bool recheck_line (char *line, line_flags_t *flags)
@@ -142,14 +158,16 @@ bool protocol_main_loop (void)
         grbl.report.feedback_message(Message_ProbeProtected);
     } else if (limits_homing_required()) {
         // Check for power-up and set system alarm if homing is enabled to force homing cycle
-        // by setting Grbl's alarm state. Alarm locks out all g-code commands, including the
+        // by setting grblHAL's alarm state. Alarm locks out all g-code commands, including the
         // startup scripts, but allows access to settings and internal commands.
         // Only a successful homing cycle '$H' will disable the alarm.
         // NOTE: The startup script will run after successful completion of the homing cycle. Prevents motion startup
         // blocks from crashing into things uncontrollably. Very bad.
         system_raise_alarm(Alarm_HomingRequired);
         grbl.report.feedback_message(Message_HomingCycleRequired);
-    } else if (settings.limits.flags.hard_enabled && settings.limits.flags.check_at_init && limit_signals_merge(hal.limits.get_state()).value) {
+    } else if (settings.limits.flags.hard_enabled &&
+                settings.limits.flags.check_at_init &&
+                 (limit_signals_merge(hal.limits.get_state()).value & sys.hard_limits.mask)) {
         if(sys.alarm == Alarm_LimitsEngaged && hal.control.get_state().limits_override)
             state_set(STATE_IDLE); // Clear alarm state to enable limit switch pulloff.
         else {
@@ -187,13 +205,15 @@ bool protocol_main_loop (void)
         hal.coolant.set_state((coolant_state_t){0});
         if(realtime_queue.head != realtime_queue.tail)
             system_set_exec_state_flag(EXEC_RT_COMMAND);  // execute any boot up commands
+        on_execute_delay = grbl.on_execute_delay;
+        grbl.on_execute_delay = protocol_on_execute_delay;
         sys.cold_start = false;
-    } else
+    } else // TODO: if flushing entries from the queue that has allocated data associated then these will be orphaned/leaked.
         memset(&realtime_queue, 0, sizeof(realtime_queue_t));
 
     // ---------------------------------------------------------------------------------
     // Primary loop! Upon a system abort, this exits back to main() to reset the system.
-    // This is also where Grbl idles while waiting for something to do.
+    // This is also where grblHAL idles while waiting for something to do.
     // ---------------------------------------------------------------------------------
 
     int16_t c;
@@ -244,7 +264,7 @@ bool protocol_main_loop (void)
                     gc_state.last_error = Status_Overflow;
                 else if(*line == '\0') // Empty line. For syncing purposes.
                     gc_state.last_error = Status_OK;
-                else if(*line == '$') {// Grbl '$' system command
+                else if(*line == '$') {// grblHAL '$' system command
                     if((gc_state.last_error = system_execute_line(line)) == Status_LimitsEngaged) {
                         system_raise_alarm(Alarm_LimitsEngaged);
                         grbl.report.feedback_message(Message_CheckLimits);
@@ -323,7 +343,7 @@ bool protocol_main_loop (void)
         // Handle extra command (internal stream)
         if(xcommand[0] != '\0') {
 
-            if (xcommand[0] == '$') // Grbl '$' system command
+            if (xcommand[0] == '$') // grblHAL '$' system command
                 system_execute_line(xcommand);
             else if (state_get() & (STATE_ALARM|STATE_ESTOP|STATE_JOG)) // Everything else is gcode. Block if in alarm, eStop or jog state.
                 grbl.report.status_message(Status_SystemGClock);
@@ -355,9 +375,13 @@ bool protocol_main_loop (void)
 bool protocol_buffer_synchronize (void)
 {
     bool ok = true;
+
     // If system is queued, ensure cycle resumes if the auto start flag is present.
     protocol_auto_cycle_start();
+
+    sys.flags.synchronizing = On;
     while ((ok = protocol_execute_realtime()) && (plan_get_current_block() || state_get() == STATE_CYCLE));
+    sys.flags.synchronizing = Off;
 
     return ok;
 }
@@ -376,7 +400,7 @@ void protocol_auto_cycle_start (void)
 }
 
 
-// This function is the general interface to Grbl's real-time command execution system. It is called
+// This function is the general interface to grblHAL's real-time command execution system. It is called
 // from various check points in the main program, primarily where there may be a while loop waiting
 // for a buffer to clear space or any point where the execution time from the last check point may
 // be more than a fraction of a second. This is a way to execute realtime commands asynchronously
@@ -428,8 +452,8 @@ static void protocol_poll_cmd (void)
     }
 }
 
-// Executes run-time commands, when required. This function primarily operates as Grbl's state
-// machine and controls the various real-time features Grbl has to offer.
+// Executes run-time commands, when required. This function primarily operates as grblHAL's state
+// machine and controls the various real-time features grblHAL has to offer.
 // NOTE: Do not alter this unless you know exactly what you are doing!
 bool protocol_exec_rt_system (void)
 {
@@ -446,7 +470,7 @@ bool protocol_exec_rt_system (void)
         }
 
         // System alarm. Everything has shutdown by something that has gone severely wrong. Report
-        // the source of the error to the user. If critical, Grbl disables by entering an infinite
+        // the source of the error to the user. If critical, grblHAL disables by entering an infinite
         // loop until system reset/abort.
         system_raise_alarm((alarm_code_t)rt_exec);
 
@@ -542,7 +566,6 @@ bool protocol_exec_rt_system (void)
                 sys.override.control = gc_state.modal.override_ctrl;
 
             gc_state.tool_change = false;
-            gc_state.modal.spindle.rpm_mode = SpindleSpeedMode_RPM;
 
             // Tell driver/plugins about reset.
             hal.driver_reset();
@@ -554,21 +577,23 @@ bool protocol_exec_rt_system (void)
 
             gc_init();
             plan_reset();
-/*            if(sys.alarm_pending == Alarm_ProbeProtect) {
+            if(sys.alarm_pending == Alarm_ProbeProtect) {
                 st_go_idle();
                 system_set_exec_alarm(sys.alarm_pending);
                 sys.alarm_pending = Alarm_None;
-            } else*/
-            st_reset();
+            } else
+                st_reset();
             sync_position();
 
             // Kill spindle and coolant. TODO: Check Mach3 behaviour?
             gc_spindle_off();
-            gc_coolant_off();
+            gc_coolant((coolant_state_t){0});
 
             flush_override_buffers();
-            if(!((state_get() == STATE_ALARM) && (sys.alarm == Alarm_LimitsEngaged || sys.alarm == Alarm_HomingRequired)))
+            if(!((state_get() == STATE_ALARM) && (sys.alarm == Alarm_LimitsEngaged || sys.alarm == Alarm_HomingRequired))) {
                 state_set(hal.control.get_state().safety_door_ajar ? STATE_SAFETY_DOOR : STATE_IDLE);
+                grbl.report.feedback_message(Message_Stop);
+            }
         }
 
         // Execute and print status to output stream
@@ -586,7 +611,7 @@ bool protocol_exec_rt_system (void)
             report_pid_log();
 
         if(rt_exec & EXEC_RT_COMMAND)
-            protocol_execute_rt_commands();
+            protocol_execute_rt_commands(0);
 
         rt_exec &= ~(EXEC_STOP|EXEC_STATUS_REPORT|EXEC_GCODE_REPORT|EXEC_PID_REPORT|EXEC_TLO_REPORT|EXEC_RT_COMMAND); // clear requests already processed
 
@@ -658,7 +683,7 @@ bool protocol_exec_rt_system (void)
     if(!sys.override_delay.spindle && (rt_exec = get_spindle_override())) {
 
         bool spindle_stop = false;
-        spindle_ptrs_t *spindle = gc_spindle_get();
+        spindle_ptrs_t *spindle = gc_spindle_get(-1)->hal;
         override_t last_s_override = spindle->param->override_pct;
 
         do {
@@ -701,7 +726,7 @@ bool protocol_exec_rt_system (void)
 
         spindle_set_override(spindle, last_s_override);
 
-        if (spindle_stop && state_get() == STATE_HOLD && gc_state.modal.spindle.state.on) {
+        if (spindle_stop && state_get() == STATE_HOLD && gc_spindle_get(-1)->state.on) {
             // Spindle stop override allowed only while in HOLD state.
             // NOTE: Report flag is set in spindle_set_state() when spindle stop is executed.
             if (!sys.override.spindle_stop.value)
@@ -720,15 +745,13 @@ bool protocol_exec_rt_system (void)
             switch(rt_exec) {
 
                 case CMD_OVERRIDE_COOLANT_MIST_TOGGLE:
-                    if (hal.driver_cap.mist_control && ((state_get() == STATE_IDLE) || (state_get() & (STATE_CYCLE | STATE_HOLD)))) {
+                    if(hal.coolant_cap.mist && ((state_get() == STATE_IDLE) || (state_get() & (STATE_CYCLE | STATE_HOLD))))
                         coolant_state.mist = !coolant_state.mist;
-                    }
                     break;
 
                 case CMD_OVERRIDE_COOLANT_FLOOD_TOGGLE:
-                    if ((state_get() == STATE_IDLE) || (state_get() & (STATE_CYCLE | STATE_HOLD))) {
+                    if(hal.coolant_cap.flood && ((state_get() == STATE_IDLE) || (state_get() & (STATE_CYCLE | STATE_HOLD))))
                         coolant_state.flood = !coolant_state.flood;
-                    }
                     break;
 
                 default:
@@ -742,8 +765,7 @@ bool protocol_exec_rt_system (void)
       // NOTE: Since coolant state always performs a planner sync whenever it changes, the current
       // run state can be determined by checking the parser state.
         if(coolant_state.value != gc_state.modal.coolant.value) {
-            coolant_set_state(coolant_state); // Report flag set in coolant_set_state().
-            gc_state.modal.coolant = coolant_state;
+            gc_coolant(coolant_state); // Report flag set in gc_coolant().
             if(grbl.on_override_changed)
                 grbl.on_override_changed(OverrideChanged_CoolantState);
         }
@@ -758,9 +780,9 @@ bool protocol_exec_rt_system (void)
     return !ABORTED;
 }
 
-// Handles Grbl system suspend procedures, such as feed hold, safety door, and parking motion.
+// Handles grblHAL system suspend procedures, such as feed hold, safety door, and parking motion.
 // The system will enter this loop, create local variables for suspend tasks, and return to
-// whatever function that invoked the suspend, such that Grbl resumes normal operation.
+// whatever function that invoked the suspend, such that grblHAL resumes normal operation.
 // This function is written in a way to promote custom parking motions. Simply use this as a
 // template.
 static void protocol_exec_rt_suspend (sys_state_t state)
@@ -920,12 +942,12 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(char c)
             break;
 
         case CMD_MPG_MODE_TOGGLE:           // Switch off MPG mode
-            if(hal.stream.type == StreamType_MPG)
-                stream_mpg_enable(false);
+            if((drop = hal.stream.type == StreamType_MPG))
+                protocol_enqueue_foreground_task(stream_mpg_set_mode, NULL);
             break;
 
         case CMD_AUTO_REPORTING_TOGGLE:
-            if(settings.report_interval)
+            if((drop = settings.report_interval != 0))
                 sys.flags.auto_reporting = !sys.flags.auto_reporting;
             break;
 
@@ -1008,31 +1030,54 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(char c)
     return drop;
 }
 
-// Enqueue a function to be called once by the
-// foreground process, typically enqueued from an interrupt handler.
-ISR_CODE bool ISR_FUNC(protocol_enqueue_rt_command)(on_execute_realtime_ptr fn)
+static const uint32_t dummy_data = 0;
+
+
+/*! \brief Enqueue a function to be called once by the foreground process.
+\param fn pointer to a \a foreground_task_ptr type of function.
+\param data pointer to data to be passed to the callee.
+\returns true if successful, false otherwise.
+*/
+ISR_CODE bool ISR_FUNC(protocol_enqueue_foreground_task)(fg_task_ptr fn, void *data)
 {
     bool ok;
     uint_fast8_t bptr = (realtime_queue.head + 1) & (RT_QUEUE_SIZE - 1);    // Get next head pointer
 
-    if((ok = bptr != realtime_queue.tail)) {          // If not buffer full
-        realtime_queue.fn[realtime_queue.head] = fn;  // add function pointer to buffer,
-        realtime_queue.head = bptr;                   // update pointer and
-        system_set_exec_state_flag(EXEC_RT_COMMAND);  // flag it for execute
+    if((ok = bptr != realtime_queue.tail)) {                    // If not buffer full
+        realtime_queue.task[realtime_queue.head].data = data;
+        realtime_queue.task[realtime_queue.head].task = fn;       // add function pointer to buffer,
+        realtime_queue.head = bptr;                             // update pointer and
+        system_set_exec_state_flag(EXEC_RT_COMMAND);            // flag it for execute
     }
 
     return ok;
 }
 
+/*! \brief Enqueue a function to be called once by the foreground process.
+\param fn pointer to a \a on_execute_realtime_ptr type of function.
+\returns true if successful, false otherwise.
+__NOTE:__ Deprecated, use protocol_enqueue_foreground_task instead.
+*/
+ISR_CODE bool ISR_FUNC(protocol_enqueue_rt_command)(on_execute_realtime_ptr fn)
+{
+    return protocol_enqueue_foreground_task(fn, (void *)&dummy_data);
+}
+
 // Execute enqueued functions.
-static void protocol_execute_rt_commands (void)
+static void protocol_execute_rt_commands (sys_state_t state)
 {
     while(realtime_queue.tail != realtime_queue.head) {
         uint_fast8_t bptr = realtime_queue.tail;
-        on_execute_realtime_ptr call;
-        if((call = realtime_queue.fn[bptr])) {
-            realtime_queue.fn[bptr] = NULL;
-            call(state_get());
+        if(realtime_queue.task[bptr].task.fn) {
+            if(realtime_queue.task[bptr].data == (void *)&dummy_data) {
+                on_execute_realtime_ptr call = realtime_queue.task[bptr].task.fn_deprecated;
+                realtime_queue.task[bptr].task.fn_deprecated = NULL;
+                call(state_get());
+            } else {
+                foreground_task_ptr call = realtime_queue.task[bptr].task.fn;
+                realtime_queue.task[bptr].task.fn = NULL;
+                call(realtime_queue.task[bptr].data);
+            }
         }
         realtime_queue.tail = (bptr + 1) & (RT_QUEUE_SIZE - 1);
     }

@@ -5,22 +5,22 @@
 
   Part of grblHAL
 
-  Copyright (c) 2018-2023 Terje Io
+  Copyright (c) 2018-2024 Terje Io
   Copyright (c) 2011-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <string.h>
@@ -41,7 +41,7 @@ static void state_await_waypoint_retract (uint_fast16_t rt_exec);
 static void state_restore (uint_fast16_t rt_exec);
 static void state_await_resumed (uint_fast16_t rt_exec);
 
-static void (* volatile stateHandler)(uint_fast16_t rt_exec) = state_idle;
+static void (*volatile stateHandler)(uint_fast16_t rt_exec) = state_idle;
 
 typedef struct {
     coolant_state_t coolant;
@@ -101,7 +101,7 @@ static void state_restore_conditions (restore_condition_t *condition)
         // Block if safety door re-opened during prior restore actions.
         if (gc_state.modal.coolant.value != hal.coolant.get_state().value) {
             // NOTE: Laser mode will honor this delay. An exhaust system is often controlled by this signal.
-            coolant_set_state(condition->coolant);
+            gc_coolant(condition->coolant);;
             delay_sec(settings.safety_door.coolant_on_delay, DelayMode_SysSuspend);
         }
 
@@ -122,7 +122,7 @@ static void enter_sleep (void)
 
 static bool initiate_hold (uint_fast16_t new_state)
 {
-    spindle_ptrs_t *spindle;
+    spindle_t *spindle;
     spindle_num_t spindle_num = N_SYS_SPINDLE;
 
     if (settings.parking.flags.enabled) {
@@ -137,21 +137,21 @@ static bool initiate_hold (uint_fast16_t new_state)
     restore_condition.spindle_num = 0;
 
     do {
-        if((spindle = spindle_get(--spindle_num))) {
-            if(block && block->spindle.hal == spindle) {
+        if((spindle = gc_spindle_get(--spindle_num))) {
+            if(block && block->spindle.hal == spindle->hal) {
                 restore_condition.spindle_num = spindle_num;
                 restore_condition.spindle[spindle_num].hal = block->spindle.hal;
                 restore_condition.spindle[spindle_num].rpm = block->spindle.rpm;
                 restore_condition.spindle[spindle_num].state = block->spindle.state;
-            } else if(gc_state.spindle.hal == spindle) {
+            } else if(spindle->hal) {
                 restore_condition.spindle_num = spindle_num;
-                restore_condition.spindle[spindle_num].hal = gc_state.spindle.hal;
-                restore_condition.spindle[spindle_num].rpm = gc_state.spindle.rpm;
-                restore_condition.spindle[spindle_num].state = gc_state.modal.spindle.state;
+                restore_condition.spindle[spindle_num].hal = spindle->hal;
+                restore_condition.spindle[spindle_num].rpm = spindle->rpm;
+                restore_condition.spindle[spindle_num].state = spindle->state;
             } else {
-                restore_condition.spindle[spindle_num].hal = spindle;
-                restore_condition.spindle[spindle_num].rpm = spindle->param->rpm;
-                restore_condition.spindle[spindle_num].state = spindle->param->state;
+                restore_condition.spindle[spindle_num].hal = NULL;
+//                restore_condition.spindle[spindle_num].rpm = spindle->param->rpm;
+//                restore_condition.spindle[spindle_num].state = spindle->param->state;
             }
         } else
             restore_condition.spindle[spindle_num].hal = NULL;
@@ -352,7 +352,7 @@ void state_set (sys_state_t new_state)
 // Suspend manager. Controls spindle overrides in hold states.
 void state_suspend_manager (void)
 {
-    if (stateHandler != state_await_resume || !gc_state.modal.spindle.state.on)
+    if (stateHandler != state_await_resume || !gc_spindle_get(0)->state.on)
         return;
 
     if (sys.override.spindle_stop.value) {
@@ -378,7 +378,7 @@ void state_suspend_manager (void)
                 grbl.on_override_changed(OverrideChanged_SpindleState);
         }
 
-    } else if (sys.step_control.update_spindle_rpm && restore_condition.spindle[0].hal->get_state().on) {
+    } else if (sys.step_control.update_spindle_rpm && restore_condition.spindle[0].hal->get_state(restore_condition.spindle[0].hal).on) {
         // Handles spindle state during hold. NOTE: Spindle speed overrides may be altered during hold state.
         state_spindle_set_state(&restore_condition.spindle[restore_condition.spindle_num]);
         sys.step_control.update_spindle_rpm = Off;
@@ -654,19 +654,19 @@ static void state_await_resume (uint_fast16_t rt_exec)
 
             default:
                 if (!settings.flags.restore_after_feed_hold) {
-                    if (!restore_condition.spindle[restore_condition.spindle_num].hal->get_state().on)
+                    if (!restore_condition.spindle[restore_condition.spindle_num].hal->get_state(restore_condition.spindle[restore_condition.spindle_num].hal).on)
                         gc_spindle_off();
                     sys.override.spindle_stop.value = 0; // Clear spindle stop override states
                 } else {
 
-                    if (restore_condition.spindle[restore_condition.spindle_num].state.on != restore_condition.spindle[restore_condition.spindle_num].hal->get_state().on) {
+                    if (restore_condition.spindle[restore_condition.spindle_num].state.on != restore_condition.spindle[restore_condition.spindle_num].hal->get_state(restore_condition.spindle[restore_condition.spindle_num].hal).on) {
                         grbl.report.feedback_message(Message_SpindleRestore);
                         state_spindle_restore(&restore_condition.spindle[restore_condition.spindle_num]);
                     }
 
                     if (restore_condition.coolant.value != hal.coolant.get_state().value) {
                         // NOTE: Laser mode will honor this delay. An exhaust system is often controlled by coolant signals.
-                        coolant_set_state(restore_condition.coolant);
+                        gc_coolant(restore_condition.coolant);
                         delay_sec(settings.safety_door.coolant_on_delay, DelayMode_SysSuspend);
                     }
 
@@ -747,7 +747,7 @@ static void state_await_waypoint_retract (uint_fast16_t rt_exec)
         // NOTE: Clear accessory state after retract and after an aborted restore motion.
         park.plan_data.spindle.state.value = 0;
         park.plan_data.spindle.rpm = 0.0f;
-        park.plan_data.spindle.hal->set_state(park.plan_data.spindle.state, 0.0f); // De-energize
+        park.plan_data.spindle.hal->set_state(park.plan_data.spindle.hal, park.plan_data.spindle.state, 0.0f); // De-energize
 
         if (!settings.safety_door.flags.keep_coolant_on) {
             park.plan_data.condition.coolant.value = 0;

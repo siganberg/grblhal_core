@@ -5,20 +5,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2023 Terje Io
+  Copyright (c) 2020-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 //
@@ -79,6 +79,10 @@
 #define PROBE_ENABLE        1
 #endif
 
+#ifndef NEOPIXELS_ENABLE
+#define NEOPIXELS_ENABLE    0
+#endif
+
 #ifndef USB_SERIAL_CDC
 #define USB_SERIAL_CDC      0 // for UART comms
 #endif
@@ -86,24 +90,37 @@
 #define USB_SERIAL_WAIT     0
 #endif
 
-#ifndef KEYPAD_ENABLE
-#define KEYPAD_ENABLE       0
+#if USB_SERIAL_CDC == 0 && !defined(SERIAL_STREAM)
+#define SERIAL_STREAM       0
 #endif
 
 #ifndef MACROS_ENABLE
 #define MACROS_ENABLE       0
 #endif
 
-#ifndef MPG_ENABLE
-#define MPG_ENABLE          0
+#ifndef KEYPAD_ENABLE
+#define KEYPAD_ENABLE       0
 #endif
 
-#if MPG_ENABLE == 1 && KEYPAD_ENABLE == 2
-#define MPG_MODE            2
-#elif MPG_ENABLE
-#define MPG_MODE            1
+#if KEYPAD_ENABLE == 1
+#ifdef I2C_STROBE_ENABLE
+#undef I2C_STROBE_ENABLE
+#endif
+#define I2C_STROBE_ENABLE 1
+#elif KEYPAD_ENABLE == 2 && !defined(KEYPAD_STREAM)
+#if USB_SERIAL_CDC
+#define KEYPAD_STREAM     0
 #else
-#define MPG_MODE            0
+#define KEYPAD_STREAM     1
+#endif
+#endif
+
+#ifndef I2C_STROBE_ENABLE
+#define I2C_STROBE_ENABLE   0
+#endif
+
+#ifndef MPG_ENABLE
+#define MPG_ENABLE          0
 #endif
 
 #if MPG_ENABLE && !defined(MPG_STREAM)
@@ -112,24 +129,6 @@
 #else
 #define MPG_STREAM          1
 #endif
-#endif
-
-#if KEYPAD_ENABLE == 1
-#ifdef I2C_STROBE_ENABLE
-#undef I2C_STROBE_ENABLE
-#endif
-#define I2C_STROBE_ENABLE 1
-#elif KEYPAD_ENABLE == 2 && !defined(MPG_STREAM)
-#ifndef KEYPAD_STREAM
-#if USB_SERIAL_CDC
-#define KEYPAD_STREAM     0
-#else
-#define KEYPAD_STREAM     1
-#endif
-#endif
-#endif
-#ifndef I2C_STROBE_ENABLE
-#define I2C_STROBE_ENABLE   0
 #endif
 
 #if DISPLAY_ENABLE == 2
@@ -155,20 +154,31 @@
 #endif
 
 #ifndef SPINDLE_SYNC_ENABLE
-#define SPINDLE_SYNC_ENABLE 0
+#define SPINDLE_SYNC_ENABLE     0
+#endif
+
+#ifndef SPINDLE_ENCODER_ENABLE
+#if SPINDLE_SYNC_ENABLE
+#define SPINDLE_ENCODER_ENABLE  1
+#else
+#define SPINDLE_ENCODER_ENABLE  0
+#endif
 #endif
 
 #ifndef TRINAMIC_ENABLE
   #define TRINAMIC_ENABLE   0
 #endif
 #if TRINAMIC_ENABLE == 2209
-  #if !defined(TRINAMIC_UART_ENABLE)
+  #ifndef TRINAMIC_UART_ENABLE
     #define TRINAMIC_UART_ENABLE 1
+  #endif
+  #if !defined(TRINAMIC_STREAM) && TRINAMIC_UART_ENABLE == 1
+    #define TRINAMIC_STREAM 1
   #endif
 #else
   #define TRINAMIC_UART_ENABLE 0
 #endif
-#if (TRINAMIC_ENABLE == 2130 || TRINAMIC_ENABLE == 5160 || TRINAMIC_ENABLE == 2660)
+#if (TRINAMIC_ENABLE == 2130 || TRINAMIC_ENABLE == 2660 || TRINAMIC_ENABLE == 5160)
   #if !defined(TRINAMIC_SPI_ENABLE)
     #define TRINAMIC_SPI_ENABLE  1
   #endif
@@ -196,6 +206,11 @@
 #endif
 #ifndef PLASMA_ENABLE
 #define PLASMA_ENABLE       0
+#elif PLASMA_ENABLE
+#if defined(STEP_INJECT_ENABLE)
+#undef STEP_INJECT_ENABLE
+#endif
+#define STEP_INJECT_ENABLE  1
 #endif
 #ifndef PPI_ENABLE
 #define PPI_ENABLE          0
@@ -210,12 +225,98 @@
 #endif
 #endif
 
-#ifndef VFD_SPINDLE
-#if VFD_ENABLE
-#define VFD_SPINDLE         1
-#else
-#define VFD_SPINDLE         0
+#ifndef SPINDLE0_ENABLE
+#define SPINDLE0_ENABLE SPINDLE_PWM0
 #endif
+
+#ifndef SPINDLE1_ENABLE
+#define SPINDLE1_ENABLE     0
+#elif SPINDLE1_ENABLE == -1 || SPINDLE1_ENABLE == SPINDLE_ALL || SPINDLE1_ENABLE == SPINDLE_ALL_VFD
+#warning "SPINDLE1_ENABLE cannot be set to -1, SPINDLE_ALL or SPINDLE_ALL_VFD"
+#undef SPINDLE1_ENABLE
+#define SPINDLE1_ENABLE     0
+#endif
+
+#ifndef SPINDLE2_ENABLE
+#define SPINDLE2_ENABLE     0
+#elif SPINDLE2_ENABLE == -1 || SPINDLE2_ENABLE == SPINDLE_ALL || SPINDLE2_ENABLE == SPINDLE_ALL_VFD
+#warning "SPINDLE2_ENABLE cannot be set to -1, SPINDLE_ALL or SPINDLE_ALL_VFD"
+#undef SPINDLE2_ENABLE
+#define SPINDLE2_ENABLE     0
+#endif
+
+#ifndef SPINDLE3_ENABLE
+#define SPINDLE3_ENABLE     0
+#elif SPINDLE3_ENABLE == -1 || SPINDLE3_ENABLE == SPINDLE_ALL || SPINDLE3_ENABLE == SPINDLE_ALL_VFD
+#warning "SPINDLE3_ENABLE cannot be set to -1, SPINDLE_ALL or SPINDLE_ALL_VFD"
+#undef SPINDLE1_ENABLE
+#define SPINDLE1_ENABLE     0
+#endif
+
+#if SPINDLE0_ENABLE == -1 || SPINDLE0_ENABLE == SPINDLE_ALL
+#define SPINDLE_ENABLE (SPINDLE_ALL|(1<<SPINDLE1_ENABLE)|(1<<SPINDLE2_ENABLE)|(1<<SPINDLE3_ENABLE))
+#elif SPINDLE0_ENABLE == SPINDLE_ALL_VFD
+#define SPINDLE_ENABLE (SPINDLE_ALL_VFD|SPINDLE_ALL|(1<<SPINDLE1_ENABLE)|(1<<SPINDLE2_ENABLE)|(1<<SPINDLE3_ENABLE))
+#else
+#define SPINDLE_ENABLE ((1<<SPINDLE0_ENABLE)|(1<<SPINDLE1_ENABLE)|(1<<SPINDLE2_ENABLE)|(1<<SPINDLE3_ENABLE))
+#endif
+
+// Driver spindle 0
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM0)|(1<<SPINDLE_PWM0_NODIR)|(1<<SPINDLE_ONOFF0)|(1<<SPINDLE_ONOFF0_DIR))
+#define DRIVER_SPINDLE_ENABLE       1
+#else
+#define DRIVER_SPINDLE_ENABLE       0
+#endif
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM0)|(1<<SPINDLE_ONOFF0_DIR))
+#define DRIVER_SPINDLE_DIR_ENABLE   1
+#else
+#define DRIVER_SPINDLE_DIR_ENABLE   0
+#endif
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM0)|(1<<SPINDLE_PWM0_NODIR))
+#define DRIVER_SPINDLE_PWM_ENABLE  1
+#define DRIVER_SPINDLE_NAME "PWM"
+#else
+#define DRIVER_SPINDLE_PWM_ENABLE  0
+#if DRIVER_SPINDLE_ENABLE
+#define DRIVER_SPINDLE_NAME "Basic"
+#endif
+#endif
+
+// Driver spindle 1
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM1)|(1<<SPINDLE_PWM1_NODIR)|(1<<SPINDLE_ONOFF1)|(1<<SPINDLE_ONOFF1_DIR))
+#define DRIVER_SPINDLE1_ENABLE       1
+#else
+#define DRIVER_SPINDLE1_ENABLE       0
+#endif
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM1)|(1<<SPINDLE_ONOFF1_DIR))
+#define DRIVER_SPINDLE1_DIR_ENABLE   1
+#else
+#define DRIVER_SPINDLE1_DIR_ENABLE   0
+#endif
+
+#if SPINDLE_ENABLE & ((1<<SPINDLE_PWM1)|(1<<SPINDLE_PWM1_NODIR))
+#define DRIVER_SPINDLE1_PWM_ENABLE  1
+#define DRIVER_SPINDLE1_NAME "PWM2"
+#else
+#define DRIVER_SPINDLE1_PWM_ENABLE  0
+#if DRIVER_SPINDLE1_ENABLE
+#define DRIVER_SPINDLE1_NAME "Basic2"
+#endif
+#endif
+
+//
+
+#ifndef VFD_ENABLE
+  #if SPINDLE_ENABLE & SPINDLE_ALL_VFD
+    #define VFD_ENABLE 1
+  #else
+    #define VFD_ENABLE 0
+  #endif
 #endif
 
 #define MODBUS_RTU_ENABLED     0b001
@@ -223,8 +324,8 @@
 #define MODBUS_TCP_ENABLED     0b100
 
 #if MODBUS_ENABLE == 2
-#undef MOBUS_ENABLE
-#define MOBUS_ENABLE 0b011
+#undef MODBUS_ENABLE
+#define MODBUS_ENABLE 0b011
 #endif
 
 #ifndef MODBUS_ENABLE
@@ -235,14 +336,19 @@
 #endif
 #endif
 
-#if !VFD_SPINDLE || N_SPINDLE > 1
-#define DRIVER_SPINDLE_ENABLE  1
-#else
-#define DRIVER_SPINDLE_ENABLE  0
+#ifndef STEP_INJECT_ENABLE
+  #if SPINDLE_ENABLE & (1<<SPINDLE_STEPPER)
+    #define STEP_INJECT_ENABLE 1
+  #else
+    #define STEP_INJECT_ENABLE 0
+  #endif
 #endif
 
 #ifndef QEI_ENABLE
 #define QEI_ENABLE          0
+#endif
+#ifndef QEI_SELECT_ENABLE
+#define QEI_SELECT_ENABLE   0
 #endif
 #ifndef ODOMETER_ENABLE
 #define ODOMETER_ENABLE     0
@@ -269,8 +375,31 @@
 #endif
 #endif
 
+// Optional control signals
+
 #ifndef SAFETY_DOOR_ENABLE
 #define SAFETY_DOOR_ENABLE  0
+#endif
+#ifndef PROBE_DISCONNECT_ENABLE
+#define PROBE_DISCONNECT_ENABLE 0
+#endif
+#ifndef STOP_DISABLE_ENABLE
+#define STOP_DISABLE_ENABLE 0
+#endif
+#ifndef BLOCK_DELETE_ENABLE
+#define BLOCK_DELETE_ENABLE 0
+#endif
+#ifndef SINGLE_BLOCK_ENABLE
+#define SINGLE_BLOCK_ENABLE 0
+#endif
+#ifndef MOTOR_FAULT_ENABLE
+#define MOTOR_FAULT_ENABLE 0
+#endif
+#ifndef MOTOR_WARNING_ENABLE
+#define MOTOR_WARNING_ENABLE 0
+#endif
+#ifndef LIMITS_OVERRIDE_ENABLE
+#define LIMITS_OVERRIDE_ENABLE 0
 #endif
 
 #if SAFETY_DOOR_ENABLE && defined(NO_SAFETY_DOOR_SUPPORT)
@@ -286,6 +415,8 @@
 #elif ESTOP_ENABLE && COMPATIBILITY_LEVEL > 1
   #warning "Enabling ESTOP may not work with all senders!"
 #endif
+
+//
 
 #ifndef WIFI_ENABLE
 #define WIFI_ENABLE         0
@@ -303,7 +434,7 @@
 #define WEBUI_INFLASH       0
 #endif
 
-#if WEBUI_ENABLE && !defined(ESP_PLATFORM) 
+#if WEBUI_ENABLE
 
 #if !WIFI_ENABLE
 #ifdef ETHERNET_ENABLE

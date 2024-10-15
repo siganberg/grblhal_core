@@ -3,20 +3,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2016-2023 Terje Io
+  Copyright (c) 2016-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 /*! \file
@@ -38,6 +38,7 @@
 #include "nvs.h"
 #include "probe.h"
 #include "ioports.h"
+#include "rgb.h"
 #include "plugins.h"
 
 #define HAL_VERSION 10
@@ -53,8 +54,10 @@ typedef union {
                  control_pull_up           :1, //!< Pullup resistors for control inputs are supported.
                  probe_pull_up             :1, //!< Pullup resistors for probe inputs are supported.
                  amass_level               :2, // 0...3 Deprecated?
+                 spindle_encoder           :1, //!< Spindle encoder is supported.
                  spindle_sync              :1, //!< Spindle synced motion is supported.
                  sd_card                   :1,
+                 littlefs                  :1,
                  bluetooth                 :1,
                  ethernet                  :1,
                  wifi                      :1,
@@ -66,7 +69,7 @@ typedef union {
                  odometers                 :1,
                  pwm_spindle               :1,
                  probe_latch               :1,
-                 unassigned                :11;
+                 unassigned                :10;
     };
 } driver_cap_t;
 
@@ -244,10 +247,11 @@ typedef void (*stepper_go_idle_ptr)(bool clear_signals);
 /*! \brief Pointer to function for enabling/disabling stepper motors.
 
 \param enable a \a axes_signals_t union containing separate flags for each motor to enable/disable.
+\param hold a \a true to keep motor powered with reduced current, \a false otherwise.
 
 __NOTE:__ this function may be called from an interrupt context.
 */
-typedef void (*stepper_enable_ptr)(axes_signals_t enable);
+typedef void (*stepper_enable_ptr)(axes_signals_t enable, bool hold);
 
 /*! \brief Pointer to function for enabling/disabling step signals for individual motors.
 
@@ -300,6 +304,13 @@ typedef void (*stepper_output_step_ptr)(axes_signals_t step_outbits, axes_signal
 */
 typedef axes_signals_t (*stepper_get_ganged_ptr)(bool auto_squared);
 
+/*! \brief Pointer to function for claiming/releasing motor(s) from/to normal step/dir signalling.
+
+\param axis_id a \a the axis to claim/release motor(s) for.
+\param claim \a true to claim a motor(s), \a false to release.
+*/
+typedef void (*stepper_claim_motor_ptr)(uint_fast8_t axis_id, bool claim);
+
 /*! \brief Pointer to callback function for outputting the next direction and step pulse signals. _Set by the core on startup._
 
 To be called by the driver from the main stepper interrupt handler (when the timer times out).
@@ -316,6 +327,7 @@ typedef struct {
     stepper_pulse_start_ptr pulse_start;                //!< Handler for starting outputting direction signals and a step pulse. Called from interrupt context.
     stepper_interrupt_callback_ptr interrupt_callback;  //!< Callback for informing about the next step pulse to output. _Set by the core at startup._
     stepper_get_ganged_ptr get_ganged;                  //!< Optional handler getting which axes are configured for ganging or auto squaring.
+    stepper_claim_motor_ptr claim_motor;                //!< Optional handler for claiming/releasing motor(s) from normal step/dir control.
     stepper_output_step_ptr output_step;                //!< Optional handler for outputting a single step pulse. _Experimental._ Called from interrupt context.
     motor_iterator_ptr motor_iterator;                  //!< Optional handler iteration over motor vs. axis mappings. Required for the motors plugin (Trinamic drivers).
 } stepper_ptrs_t;
@@ -394,61 +406,6 @@ typedef struct {
 } tool_ptrs_t;
 
 
-/*****************
- *  User M-code  *
- *****************/
-
-/*! \brief Pointer to function for checking if user defined M-code is supported.
-\param mcode as a #user_mcode_t enum.
-\returns the \a mcode argument if M-code is handled, #UserMCode_Ignore if not.
-*/
-typedef user_mcode_t (*user_mcode_check_ptr)(user_mcode_t mcode);
-
-/*! \brief Pointer to function for validating parameters for a user defined M-code.
-
-The M-code to validate is found in \a gc_block->user_mcode, parameter values in \a gc_block->values
- and corresponding parameter letters in the \a gc_block->words bitfield union.
-
-Parameter values claimed by the M-code must be flagged in the \a gc_block->words bitfield union by setting the
- respective parameter letters to \a false or the parser will raise the #Status_GcodeUnusedWords error.
-
-The validation function may set \a gc_block->user_mcode_sync to \a true if it is to be executed
-after all buffered motions are completed, otherwise it will be executed immediately.
-
-__NOTE:__ Valueless parameter letters are allowed for floats, these are set to NAN (not a number) if so.
-The validation function should always test these by using the isnan() function in addition to any range checks.
-
-\param gc_block pointer to a parser_block_t structure.
-\param parameter_words pointer to a parameter_words_t structure. __NOTE:__ this parameter is deprecated and will be removed, use \a gc_block->words instead.
-\returns #Status_OK enum value if validated ok, appropriate \ref status_code_t enum value if not or #Status_Unhandled if the M-code is not recognized.
-*/
-typedef status_code_t (*user_mcode_validate_ptr)(parser_block_t *gc_block, parameter_words_t *parameter_words);
-
-/*! \brief Pointer to function for executing a user defined M-code.
-
-The M-code to execute is found in \a gc_block->user_mcode, parameter values in \a gc_block->values
- and claimed/validated parameter letters in the \a gc_block->words bitfield union.
-
-\param state as a #sys_state_t variable.
-\param gc_block pointer to a parser_block_t structure.
-\returns #Status_OK enum value if validated ok, appropriate \ref status_code_t enum value if not or #Status_Unhandled if M-code is not recognized.
-*/
-typedef void (*user_mcode_execute_ptr)(sys_state_t state, parser_block_t *gc_block);
-
-/*! \brief Optional handlers for user defined M-codes.
-
-Handlers may be chained so that several plugins can add M-codes.
-Chaining is achieved by saving a copy of the current user_mcode_ptrs_t struct
- when the plugin is initialized and calling the same handler via the copy when a
- M-code is not recognized.
- */
-typedef struct {
-    user_mcode_check_ptr check;         //!< Handler for checking if a user defined M-code is supported.
-    user_mcode_validate_ptr validate;   //!< Handler for validating parameters for a user defined M-code.
-    user_mcode_execute_ptr execute;     //!< Handler for executing a user defined M-code.
-} user_mcode_ptrs_t;
-
-
 /*******************
  *  Encoder input  *
  *******************/
@@ -482,6 +439,73 @@ typedef struct {
 */
 typedef bool (*irq_claim_ptr)(irq_type_t irq, uint_fast8_t id, irq_callback_ptr callback);
 
+/************
+ *  Timers  *
+ ************/
+
+typedef void *hal_timer_t;  //!< Timer handle, actual type defined by driver implementation.
+
+typedef enum {
+    Timer_16bit = 0,
+    Timer_32bit,
+    Timer_64bit
+} timer_resolution_t;
+
+typedef union {
+    uint8_t value; //!< All bitmap flags.
+    struct {
+        uint8_t periodic :1, //!<
+                up       :1, //!< Timer supports upcounting
+                comp1    :1, //!< Timer supports compare interrupt 0
+                comp2    :1; //!< Timer supports compare interrupt 1
+    };
+} timer_cap_t;
+
+typedef void (*timer_irq_handler_ptr)(void *context);
+
+typedef struct {
+    void *context;                          //!< Pointer to data to be passed on to the interrupt handlers
+    bool single_shot;                       //!< Set to true if timer is single shot
+    timer_irq_handler_ptr timeout_callback; //!< Pointer to main timeout callback
+    uint32_t irq0;                          //!< Compare value for compare interrupt 0
+    timer_irq_handler_ptr irq0_callback;    //!< Pointer to compare interrupt 0 callback
+    uint32_t irq1;                          //!< Compare value for compare interrupt 10
+    timer_irq_handler_ptr irq1_callback;    //!< Pointer to compare interrupt 1 callback
+} timer_cfg_t;
+
+/*! \brief Pointer to function for claiming a timer.
+\param cap pointer to a \a timer_cap_t struct containing the required capabilities.
+\param timebase timebase in ns.
+\returns a \a hal_timer_t pointer if successful, \a NULL if not.
+*/
+typedef hal_timer_t (*timer_claim_ptr)(timer_cap_t cap, uint32_t timebase);
+
+/*! \brief Pointer to function for configuring a timer.
+\param timer a \a hal_timer_t pointer.
+\param cfg pointer to a \a timer_cfg_t struct.
+\returns \a true if successful.
+*/
+typedef bool (*timer_cfg_ptr)(hal_timer_t timer, timer_cfg_t *cfg);
+
+/*! \brief Pointer to function for starting a timer.
+\param timer a \a hal_timer_t pointer.
+\param period delay in.
+\returns \a true if successful.
+*/
+typedef bool (*timer_start_ptr)(hal_timer_t timer, uint32_t period);
+
+/*! \brief Pointer to function for stopping a running timer.
+\param timer a \a hal_timer_t pointer.
+\returns \a true if successful.
+*/
+typedef bool (*timer_stop_ptr)(hal_timer_t timer);
+
+typedef struct {
+    timer_claim_ptr claim;
+    timer_cfg_ptr configure;
+    timer_start_ptr start;
+    timer_stop_ptr stop;
+} timer_ptrs_t;
 
 /**************************
  *  RTC (Real Time Clock  *
@@ -489,13 +513,13 @@ typedef bool (*irq_claim_ptr)(irq_type_t irq, uint_fast8_t id, irq_callback_ptr 
 
 /*! \brief Pointer to function for setting the current datetime.
 \param datetime pointer to a \a tm struct.
-\returns true if successful.
+\\returns \a true if successful.
 */
 typedef bool (*rtc_get_datetime_ptr)(struct tm *datetime);
 
 /*! \brief Pointer to function for setting the current datetime.
 \param datetime pointer to a \a tm struct.
-\returns true if successful.
+\returns \a true if successful.
 */
 typedef bool (*rtc_set_datetime_ptr)(struct tm *datetime);
 
@@ -503,6 +527,8 @@ typedef struct {
     rtc_get_datetime_ptr get_datetime;  //!< Optional handler getting the current datetime.
     rtc_set_datetime_ptr set_datetime;  //!< Optional handler setting the current datetime.
 } rtc_ptrs_t;
+
+/**/
 
 /*! \brief Pointer to function for performing a pallet shuttle.
 */
@@ -537,7 +563,7 @@ typedef struct {
     /*! \brief Driver setup handler.
     Called once by the core after settings has been loaded. The driver should enable MCU peripherals in the provided function.
     \param settings pointer to settings_t structure.
-    \returns true if completed successfully and the driver supports the _settings->version_ number, false otherwise.
+    \returns \a true if completed successfully and the driver supports the _settings->version_ number, false otherwise.
     */
     driver_setup_ptr driver_setup;
 
@@ -591,18 +617,23 @@ typedef struct {
     settings_changed_ptr settings_changed;  //!< Callback handler to be called on settings loaded or settings changed events.
     probe_ptrs_t probe;                     //!< Optional handlers for probe input(s).
     tool_ptrs_t tool;                       //!< Optional handlers for tool changes.
+    timer_ptrs_t timer;                     //!< Optional handlers for claiming and controlling timers.
     rtc_ptrs_t rtc;                         //!< Optional handlers for real time clock (RTC).
     io_port_t port;                         //!< Optional handlers for axuillary I/O (adds support for M62-M66).
+    rgb_ptr_t rgb0;                         //!< Optional handler for RGB output to LEDs (neopixels) or lamps.
+    rgb_ptr_t rgb1;                         //!< Optional handler for RGB output to LEDs (neopixels) or lamps.
     periph_port_t periph_port;              //!< Optional handlers for peripheral pin registration.
     driver_reset_ptr driver_reset;          //!< Optional handler, called on soft resets. Set to a dummy handler by the core at startup.
     nvs_io_t nvs;                           //!< Optional handlers for storing/retrieving settings and data to/from non-volatile storage (NVS).
     enumerate_pins_ptr enumerate_pins;      //!< Optional handler for enumerating pins used by the driver.
     bool (*driver_release)(void);           //!< Optional handler for releasing hardware resources before exiting.
-    uint32_t (*get_elapsed_ticks)(void);    //!< Optional handler for getting number of elapsed 1ms tics since startup. Required by a number of plugins.
+    uint32_t (*get_elapsed_ticks)(void);    //!< Optional handler for getting number of elapsed 1 ms tics since startup. Rolls over every 49.71 days.  Required by a number of plugins.
+    uint64_t (*get_micros)(void);           //!< Optional handler for getting number of elapsed 1 us tics since startup. Rolls over every 1.19 hours. Required by a number of plugins.
     pallet_shuttle_ptr pallet_shuttle;      //!< Optional handler for performing a pallet shuttle on program end (M60).
     void (*reboot)(void);                   //!< Optoional handler for rebooting the controller. This will be called when #ASCII_ESC followed by #CMD_REBOOT is received.
 
-    user_mcode_ptrs_t user_mcode;           //!< Optional handlers for user defined M-codes.
+
+    user_mcode_ptrs_t user_mcode;           //!< Optional handlers for user defined M-codes. --> SBL 
     encoder_ptrs_t encoder;                 //!< Optional handlers for encoder support.
 
     /*! \brief Optional handler for getting the current axis positions.
@@ -628,6 +659,7 @@ typedef struct {
     control_signals_t signals_cap;          //!< Control input signals supported by the driver.
     limit_signals_t limits_cap;             //!< Limit input signals supported by the driver.
     home_signals_t home_cap;                //!< Home input signals supported by the driver.
+    coolant_state_t coolant_cap;            //!< Coolant outputs supported by the driver.
 
 } grbl_hal_t;
 
@@ -641,7 +673,7 @@ Then _hal.driver_setup()_ will be called so that the driver can configure the re
 
 __NOTE__: This is the only driver function that is called directly from the core, all others are called via HAL function pointers.
 
-\returns true if completed successfully and the driver matches the _hal.version number_, false otherwise.
+\returns \a true if completed successfully and the driver matches the _hal.version number_, \a false otherwise.
 */
 extern bool driver_init (void);
 

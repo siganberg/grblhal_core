@@ -51,6 +51,7 @@ typedef struct st_block {
     output_command_t *output_commands; //!< Output commands (linked list) to be performed when block is executed
     bool backlash_motion;
     bool dynamic_rpm;                  //!< Tracks motions that require dynamic RPM adjustment
+    offset_id_t offset_id;
     spindle_ptrs_t *spindle;           //!< Pointer to current spindle for motions that require dynamic RPM adjustment
 } st_block_t;
 
@@ -68,7 +69,7 @@ typedef struct st_segment {
     bool cruising;                      //!< True when in cruising part of profile, only set for spindle synced moves
     uint_fast8_t amass_level;           //!< Indicates AMASS level for the ISR to execute this segment
     spindle_update_pwm_ptr update_pwm;  //!< Valid pointer to spindle.update_pwm() if set spindle speed at the start of the segment execution
-    spindle_update_rpm_ptr update_rpm;  //!< Valid pointer to spindle.update_rmp() if set spindle speed at the start of the segment execution
+    spindle_update_rpm_ptr update_rpm;  //!< Valid pointer to spindle.update_rpm() if set spindle speed at the start of the segment execution
 } segment_t;
 
 //! Stepper ISR data struct. Contains the running data for the main stepper ISR.
@@ -136,5 +137,7 @@ void st_update_plan_block_parameters (void);
 float st_get_realtime_rate (void);
 
 void stepper_driver_interrupt_handler (void);
+
+offset_id_t st_get_offset_id (void);
 
 #endif

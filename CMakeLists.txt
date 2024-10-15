@@ -22,6 +22,7 @@ target_sources(grbl INTERFACE
  ${CMAKE_CURRENT_LIST_DIR}/state_machine.c
  ${CMAKE_CURRENT_LIST_DIR}/stream.c
  ${CMAKE_CURRENT_LIST_DIR}/stepper.c
+ ${CMAKE_CURRENT_LIST_DIR}/stepper2.c
  ${CMAKE_CURRENT_LIST_DIR}/system.c
  ${CMAKE_CURRENT_LIST_DIR}/tool_change.c
  ${CMAKE_CURRENT_LIST_DIR}/alarms.c
@@ -32,6 +33,7 @@ target_sources(grbl INTERFACE
  ${CMAKE_CURRENT_LIST_DIR}/regex.c
  ${CMAKE_CURRENT_LIST_DIR}/ioports.c
  ${CMAKE_CURRENT_LIST_DIR}/vfs.c
+ ${CMAKE_CURRENT_LIST_DIR}/canbus.c
  ${CMAKE_CURRENT_LIST_DIR}/kinematics/corexy.c
  ${CMAKE_CURRENT_LIST_DIR}/kinematics/wall_plotter.c
  ${CMAKE_CURRENT_LIST_DIR}/kinematics/delta.c

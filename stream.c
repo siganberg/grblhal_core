@@ -3,20 +3,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2021-2023 Terje Io
+  Copyright (c) 2021-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <stdlib.h>
@@ -25,6 +25,14 @@
 #include "hal.h"
 #include "protocol.h"
 #include "state_machine.h"
+
+#if defined(DEBUG) || defined(DEBUGOUT)
+#include <stdio.h>
+#include <stdarg.h>
+#ifndef DEBUG_BUFFER
+#define DEBUG_BUFFER 100
+#endif
+#endif
 
 static stream_rx_buffer_t rxbackup;
 
@@ -37,9 +45,9 @@ typedef struct {
 typedef union {
     uint8_t value;
     struct {
-        uint8_t is_mpg    :1,
-                is_mpg_tx :1,
-                unused    :6;
+        uint8_t mpg_control :1,
+                is_mpg_tx   :1,
+                unused      :6;
     };
 } stream_connection_flags_t;
 
@@ -47,7 +55,7 @@ typedef struct stream_connection {
     const io_stream_t *stream;
     stream_is_connected_ptr is_up;
     stream_connection_flags_t flags;
-    struct stream_connection *next;
+    struct stream_connection *next, *prev;
 } stream_connection_t;
 
 static const io_stream_properties_t null_stream = {
@@ -72,8 +80,10 @@ static stream_write_char_ptr mpg_write_char = NULL;
 
 void stream_register_streams (io_stream_details_t *details)
 {
-    details->next = streams;
-    streams = details;
+    if(details->n_streams) {
+        details->next = streams;
+        streams = details;
+    }
 }
 
 bool stream_enumerate_streams (stream_enumerate_callback_ptr callback)
@@ -167,7 +177,9 @@ ISR_CODE bool ISR_FUNC(stream_enqueue_realtime_command)(char c)
     return drop;
 }
 
-static bool is_connected (void)
+// helper function for (UART) stream implementations.
+
+bool stream_connected (void)
 {
     return true;
 }
@@ -228,12 +240,13 @@ static stream_connection_t *add_connection (const io_stream_t *stream)
                 return NULL;
             }
         }
+        connection->prev = last;
         last->next = connection;
     }
 
     connection->is_up = stream->is_connected ?
                          stream->is_connected :
-                          (stream->state.is_usb && base.stream != stream ? is_not_connected : is_connected);
+                          (stream->state.is_usb && base.stream != stream ? is_not_connected : stream_connected);
 
     return connection;
 }
@@ -242,35 +255,42 @@ static bool stream_select (const io_stream_t *stream, bool add)
 {
     static const io_stream_t *active_stream = NULL;
 
+    bool send_init_message = false, mpg_enable = false;
+
     if(stream == base.stream) {
-        base.is_up = add ? (stream->is_connected ? stream->is_connected : is_connected) : is_not_connected;
+        base.is_up = add ? (stream->is_connected ? stream->is_connected : stream_connected) : is_not_connected;
         return true;
     }
 
-    if(add) {
+    if(!add) { // disconnect
 
-        if(add_connection(stream) == NULL)
-            return false;
+        if(stream == base.stream || stream == mpg.stream)
+        	return false;
 
-    } else { // disconnect
+        bool disconnected = false;
+        stream_connection_t *connection = connections->next;
 
-        stream_connection_t *prev, *last = connections;
-
-        while(last->next) {
-            prev = last;
-            last = last->next;
-            if(last->stream == stream) {
-                prev->next = last->next;
-                free(last);
-                if(prev->next)
-                    return false;
-                else {
-                    stream = prev->stream;
-                    break;
+        while(connection) {
+        	if(stream == connection->stream) {
+        		if((connection->prev->next = connection->next))
+        			connection->next->prev = connection->prev;
+                if((stream = connection->prev->stream) == mpg.stream) {
+                	mpg_enable = mpg.flags.mpg_control;
+                	if((stream = connection->prev->prev->stream) == NULL)
+                		stream = base.stream;
                 }
-            }
+                free(connection);
+        		connection = NULL;
+        		disconnected = true;
+        	} else
+        		connection = connection->next;
         }
-    }
+
+        if(!disconnected)
+        	return false;
+
+	} else if(add_connection(stream) == NULL)
+        return false;
 
     bool webui_connected = hal.stream.state.webui_connected;
 
@@ -280,51 +300,58 @@ static bool stream_select (const io_stream_t *stream, bool add)
             if(active_stream && active_stream->type != StreamType_Serial && connection_is_up((io_stream_t *)stream)) {
                 hal.stream.write = stream->write;
                 report_message("SERIAL STREAM ACTIVE", Message_Plain);
+                if(stream->get_tx_buffer_count)
+                    while(stream->get_tx_buffer_count());
+                else
+                    hal.delay_ms(100, NULL);
             }
             break;
 
         case StreamType_Telnet:
             if(connection_is_up(&hal.stream))
                 report_message("TELNET STREAM ACTIVE", Message_Plain);
-            if(add && sys.driver_started) {
-                hal.stream.write_all = stream->write;
-                grbl.report.init_message();
-            }
+            send_init_message = add && sys.driver_started;
             break;
 
         case StreamType_WebSocket:
             if(connection_is_up(&hal.stream))
                 report_message("WEBSOCKET STREAM ACTIVE", Message_Plain);
-            if(add && sys.driver_started && !hal.stream.state.webui_connected) {
-                hal.stream.write_all = stream->write;
-                grbl.report.init_message();
-            }
+            send_init_message = add && sys.driver_started && !hal.stream.state.webui_connected;
             break;
 
         case StreamType_Bluetooth:
             if(connection_is_up(&hal.stream))
                 report_message("BLUETOOTH STREAM ACTIVE", Message_Plain);
-            if(add && sys.driver_started) {
-                hal.stream.write_all = stream->write;
-                grbl.report.init_message();
-            }
+            send_init_message = add && sys.driver_started;
             break;
 
         default:
             break;
     }
 
+    if(hal.stream.type == StreamType_MPG) {
+        stream_mpg_enable(false);
+        mpg.flags.mpg_control = On;
+    } else if(mpg_enable)
+		protocol_enqueue_foreground_task(stream_mpg_set_mode, (void *)1);
+
     memcpy(&hal.stream, stream, sizeof(io_stream_t));
 
-    if(!hal.stream.write_all)
-        hal.stream.write_all = base.next != NULL ? stream_write_all : hal.stream.write;
-
     if(stream == base.stream && base.is_up == is_not_connected)
-        base.is_up = is_connected;
+        base.is_up = stream_connected;
+
+    if(hal.stream.is_connected == NULL)
+        hal.stream.is_connected = stream == base.stream ? base.is_up : stream_connected;
 
     if(stream->type == StreamType_WebSocket && !stream->state.webui_connected)
         hal.stream.state.webui_connected = webui_connected;
 
+    if(send_init_message) {
+        hal.stream.write_all = stream->write;
+        grbl.report.init_message();
+    }
+
+    hal.stream.write_all = stream_write_all;
     hal.stream.set_enqueue_rt_handler(protocol_enqueue_realtime_command);
 
     if(hal.stream.disable_rx)
@@ -362,14 +389,24 @@ io_stream_flags_t stream_get_flags (io_stream_t stream)
     return flags;
 }
 
+bool stream_set_description (const io_stream_t *stream, const char *description)
+{
+    bool ok;
+
+    if((ok = stream->type == StreamType_Serial && !stream->state.is_usb && hal.periph_port.set_pin_description)) {
+        hal.periph_port.set_pin_description(Output_TX, (pin_group_t)(PinGroup_UART + stream->instance), description);
+        hal.periph_port.set_pin_description(Input_RX, (pin_group_t)(PinGroup_UART + stream->instance), description);
+    }
+
+    return ok;
+}
+
 bool stream_connect (const io_stream_t *stream)
 {
     bool ok;
 
-    if((ok = stream_select(stream, true)) && stream->type == StreamType_Serial && !stream->state.is_usb && hal.periph_port.set_pin_description) {
-        hal.periph_port.set_pin_description(Input_RX, (pin_group_t)(PinGroup_UART + stream->instance), "Primary UART");
-        hal.periph_port.set_pin_description(Output_TX, (pin_group_t)(PinGroup_UART + stream->instance), "Primary UART");
-    }
+    if((ok = stream_select(stream, true)))
+        stream_set_description(stream, "Primary UART");
 
     return ok;
 }
@@ -403,19 +440,40 @@ void stream_disconnect (const io_stream_t *stream)
         stream_select(stream, false);
 }
 
-io_stream_t const *stream_open_instance (uint8_t instance, uint32_t baud_rate, stream_write_char_ptr rx_handler)
+io_stream_t const *stream_open_instance (uint8_t instance, uint32_t baud_rate, stream_write_char_ptr rx_handler, const char *description)
 {
     connection.instance = instance;
     connection.baud_rate = baud_rate;
     connection.stream = NULL;
 
-    if(stream_enumerate_streams(_open_instance))
+    if(stream_enumerate_streams(_open_instance)) {
         connection.stream->set_enqueue_rt_handler(rx_handler);
+        if(description)
+            stream_set_description(connection.stream, description);
+    }
 
     return connection.stream;
 }
 
 // MPG stream
+
+void stream_mpg_set_mode (void *data)
+{
+    stream_mpg_enable(data != NULL);
+}
+
+ISR_CODE bool ISR_FUNC(stream_mpg_check_enable)(char c)
+{
+    if(c == CMD_MPG_MODE_TOGGLE)
+    	task_add_immediate(stream_mpg_set_mode, (void *)1);
+    else {
+        protocol_enqueue_realtime_command(c);
+        if((c == CMD_CYCLE_START || c == CMD_CYCLE_START_LEGACY) && settings.status_report.pin_state)
+            sys.report.cycle_start |= state_get() == STATE_IDLE;
+    }
+
+    return true;
+}
 
 bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_char_ptr write_char)
 {
@@ -429,7 +487,10 @@ bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_
     if(stream->write == NULL || rx_only) {
 
         mpg.stream = stream;
-        mpg.is_up = is_connected;
+        mpg.is_up = stream_connected;
+
+        if(hal.periph_port.set_pin_description)
+            hal.periph_port.set_pin_description(Input_RX, (pin_group_t)(PinGroup_UART + stream->instance), "MPG");
 
         return true;
     }
@@ -441,6 +502,7 @@ bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_
         memcpy(&mpg, connection, sizeof(stream_connection_t));
 
         mpg.flags.is_mpg_tx = On;
+        mpg.flags.mpg_control = Off;
 
         if(mpg_write_char)
             mpg.stream->set_enqueue_rt_handler(mpg_write_char);
@@ -449,10 +511,7 @@ bool stream_mpg_register (const io_stream_t *stream, bool rx_only, stream_write_
 
         hal.stream.write_all = stream_write_all;
 
-        if(hal.periph_port.set_pin_description) {
-            hal.periph_port.set_pin_description(Output_TX, (pin_group_t)(PinGroup_UART + stream->instance), "MPG");
-            hal.periph_port.set_pin_description(Input_RX, (pin_group_t)(PinGroup_UART + stream->instance), "MPG");
-        }
+        stream_set_description(stream, "MPG");
     }
 
     return connection != NULL;
@@ -504,6 +563,7 @@ bool stream_mpg_enable (bool on)
     hal.stream.reset_read_buffer();
 
     sys.mpg_mode = on;
+    mpg.flags.mpg_control = Off;
     system_add_rt_report(Report_MPGMode);
 
     // Force a realtime status report, all reports when MPG mode active
@@ -568,7 +628,7 @@ const io_stream_t *stream_null_init (uint32_t baud_rate)
 {
     static const io_stream_t stream = {
         .type = StreamType_Null,
-        .is_connected = is_connected,
+        .is_connected = stream_connected,
         .read = stream_get_null,
         .write = null_write_string,
         .write_n =  null_write,
@@ -591,18 +651,46 @@ const io_stream_t *stream_null_init (uint32_t baud_rate)
 
 #ifdef DEBUGOUT
 
-static stream_write_ptr dbg_write = NULL;
+#if DEBUGOUT == -1
 
-static void debug_stream_warning (uint_fast16_t state)
+__attribute__((weak)) void debug_write (const char *s)
 {
-    report_message("Failed to initialize debug stream!", Message_Warning);
+    // NOOP
 }
+
+void debug_writeln (const char *s)
+{
+    debug_write(s);
+    debug_write(ASCII_EOL);
+}
+
+void debug_printf (const char *fmt, ...)
+{
+    char debug_out[DEBUG_BUFFER];
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(debug_out, sizeof(debug_out) - 1, fmt, args);
+    va_end(args);
+
+    debug_writeln(debug_out);
+}
+
+bool debug_stream_init (void)
+{
+    return true;
+}
+
+#else
+
+static stream_write_ptr dbg_write = NULL;
 
 void debug_write (const char *s)
 {
     if(dbg_write) {
         dbg_write(s);
-        while(hal.debug.get_tx_buffer_count()); // Wait until message is delivered
+        while(hal.debug.get_tx_buffer_count()) // Wait until message is delivered
+            grbl.on_execute_realtime(state_get());
     }
 }
 
@@ -611,8 +699,21 @@ void debug_writeln (const char *s)
     if(dbg_write) {
         dbg_write(s);
         dbg_write(ASCII_EOL);
-        while(hal.debug.get_tx_buffer_count()); // Wait until message is delivered
+        while(hal.debug.get_tx_buffer_count()) // Wait until message is delivered
+            grbl.on_execute_realtime(state_get());
     }
+}
+
+void debug_printf (const char *fmt, ...)
+{
+    char debug_out[DEBUG_BUFFER];
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(debug_out, sizeof(debug_out) - 1, fmt, args);
+    va_end(args);
+
+    debug_writeln(debug_out);
 }
 
 static bool debug_claim_stream (io_stream_properties_t const *stream)
@@ -628,7 +729,7 @@ static bool debug_claim_stream (io_stream_properties_t const *stream)
             hal.debug.write = debug_write;
 
             if(hal.periph_port.set_pin_description)
-                hal.periph_port.set_pin_description(Output_TX, hal.debug.instance == 0 ? PinGroup_UART : PinGroup_UART2, "Debug out");
+                hal.periph_port.set_pin_description(Output_TX, (pin_group_t)(PinGroup_UART + hal.debug.instance), "Debug out");
         }
     }
 
@@ -640,9 +741,38 @@ bool debug_stream_init (void)
     if(stream_enumerate_streams(debug_claim_stream))
         hal.debug.write(ASCII_EOL "UART debug active:" ASCII_EOL);
     else
-        protocol_enqueue_rt_command(debug_stream_warning);
+        protocol_enqueue_foreground_task(report_warning, "Failed to initialize debug stream!");
 
     return hal.debug.write == debug_write;
+}
+
+#endif // DEBUGOUT
+
+#elif defined(DEBUG)
+
+void debug_printf (const char *fmt, ...)
+{
+    char debug_out[DEBUG_BUFFER];
+
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(debug_out, sizeof(debug_out) - 1, fmt, args);
+    va_end(args);
+
+    if(hal.stream.write) {
+        report_message(debug_out, Message_Debug);
+        if(hal.stream.get_tx_buffer_count) {
+            while(hal.stream.get_tx_buffer_count()) // Wait until message is delivered
+                grbl.on_execute_realtime(state_get());
+        }
+    }
+}
+
+#else
+
+void debug_printf (const char *fmt, ...)
+{
+    // NOOP
 }
 
 #endif

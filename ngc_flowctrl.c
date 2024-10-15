@@ -5,20 +5,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2023 Terje Io
+  Copyright (c) 2023-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "hal.h"
@@ -32,7 +32,7 @@
 #include "ngc_params.h"
 
 #ifndef NGC_STACK_DEPTH
-#define NGC_STACK_DEPTH 10
+#define NGC_STACK_DEPTH 20
 #endif
 
 typedef enum {
@@ -48,14 +48,25 @@ typedef enum {
     NGCFlowCtrl_EndWhile,
     NGCFlowCtrl_Repeat,
     NGCFlowCtrl_EndRepeat,
+    NGCFlowCtrl_Sub,
+    NGCFlowCtrl_EndSub,
+    NGCFlowCtrl_Call,
     NGCFlowCtrl_Return,
     NGCFlowCtrl_RaiseAlarm,
     NGCFlowCtrl_RaiseError
 } ngc_cmd_t;
 
+typedef struct ngc_sub {
+    uint32_t o_label;
+    vfs_file_t *file;
+    size_t file_pos;
+    struct ngc_sub *next;
+} ngc_sub_t;
+
 typedef struct {
     uint32_t o_label;
     ngc_cmd_t operation;
+    ngc_sub_t *sub;
     vfs_file_t *file;
     size_t file_pos;
     char *expr;
@@ -66,6 +77,8 @@ typedef struct {
 } ngc_stack_entry_t;
 
 static volatile int_fast8_t stack_idx = -1;
+static bool skip_sub = false;
+static ngc_sub_t *subs = NULL, *exec_sub = NULL;
 static ngc_stack_entry_t stack[NGC_STACK_DEPTH] = {0};
 
 static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *operation)
@@ -97,6 +110,9 @@ static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *ope
             if (!strncmp(line + *pos, "ONTINUE", 7)) {
                 *operation = NGCFlowCtrl_Continue;
                 *pos += 7;
+            } else if (!strncmp(line + *pos, "ALL", 3)) {
+                *operation = NGCFlowCtrl_Call;
+                *pos += 3;
             } else
                 status = Status_FlowControlSyntaxError; // Unknown statement name starting with C
             break;
@@ -125,6 +141,9 @@ static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *ope
             } else if (!strncmp(line + *pos, "NDREPEAT", 8)) {
                 *operation = NGCFlowCtrl_EndRepeat;
                 *pos += 8;
+            } else if (!strncmp(line + *pos, "NDSUB", 5)) {
+                *operation = NGCFlowCtrl_EndSub;
+                *pos += 5;
             } else if (!strncmp(line + *pos, "RROR", 4)) {
                 *operation = NGCFlowCtrl_RaiseError;
                 *pos += 4;
@@ -137,7 +156,7 @@ static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *ope
                 *operation = NGCFlowCtrl_If;
                 (*pos)++;
             } else
-                *operation = Status_FlowControlSyntaxError; // Unknown statement name starting with F
+                status = Status_FlowControlSyntaxError; // Unknown statement name starting with F
             break;
 
         case 'R':
@@ -148,7 +167,15 @@ static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *ope
                 *operation = NGCFlowCtrl_Return;
                 *pos += 5;
             } else
-                *operation = Status_FlowControlSyntaxError; // Unknown statement name starting with R
+                status = Status_FlowControlSyntaxError; // Unknown statement name starting with R
+            break;
+
+        case 'S':
+            if (!strncmp(line + *pos, "UB", 2)) {
+                *operation = NGCFlowCtrl_Sub;
+                *pos += 2;
+            } else
+                status = Status_FlowControlSyntaxError; // Unknown statement name starting with S
             break;
 
         case 'W':
@@ -166,12 +193,34 @@ static status_code_t read_command (char *line, uint_fast8_t *pos, ngc_cmd_t *ope
     return status;
 }
 
+static void clear_subs (vfs_file_t *file)
+{
+    ngc_sub_t *current = subs, *prev = NULL, *next;
+
+    subs = NULL;
+
+    while(current) {
+        next = current->next;
+        if(file == NULL || file == current->file) {
+            free(current);
+            if(prev)
+                prev->next = next;
+        } else {
+            if(subs == NULL)
+                subs = current;
+            prev = current;
+        }
+        current = next;
+    }
+}
+
 static status_code_t stack_push (uint32_t o_label, ngc_cmd_t operation)
 {
-    if(stack_idx < (NGC_STACK_DEPTH - 1)) {
+    if(stack_idx < (NGC_STACK_DEPTH - 1) && (operation != NGCFlowCtrl_Call || ngc_call_push(&stack[stack_idx + 1]))) {
         stack[++stack_idx].o_label = o_label;
         stack[stack_idx].file = hal.stream.file;
         stack[stack_idx].operation = operation;
+        stack[stack_idx].sub = exec_sub;
         return Status_OK;
     }
 
@@ -185,6 +234,8 @@ static bool stack_pull (void)
     if((ok = stack_idx >= 0)) {
         if(stack[stack_idx].expr)
             free(stack[stack_idx].expr);
+        if(stack[stack_idx].operation == NGCFlowCtrl_Call)
+            ngc_call_pop();
         memset(&stack[stack_idx], 0, sizeof(ngc_stack_entry_t));
         stack_idx--;
     }
@@ -192,11 +243,31 @@ static bool stack_pull (void)
     return ok;
 }
 
+static void stack_unwind_sub (uint32_t o_label)
+{
+    while(stack_idx >= 0 && stack[stack_idx].o_label != o_label)
+        stack_pull();
+
+    if(stack_idx >= 0) {
+        vfs_seek(stack[stack_idx].file, stack[stack_idx].file_pos);
+        stack_pull();
+    }
+
+    exec_sub = stack_idx >= 0 ? stack[stack_idx].sub : NULL;
+}
 
 // Public functions
 
+void ngc_flowctrl_unwind_stack (vfs_file_t *file)
+{
+    clear_subs(file);
+    while(stack_idx >= 0 && stack[stack_idx].file == file)
+        stack_pull();
+}
+
 void ngc_flowctrl_init (void)
 {
+    clear_subs(NULL);
     while(stack_idx >= 0)
         stack_pull();
 }
@@ -212,8 +283,8 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
     if((status = read_command(line, pos, &operation)) != Status_OK)
         return status;
 
-    skipping = stack_idx >= 0 && stack[stack_idx].skip;
-    last_op = stack_idx >= 0 ? stack[stack_idx].operation : NGCFlowCtrl_NoOp;
+    skipping = skip_sub || (stack_idx >= 0 && stack[stack_idx].skip);
+    last_op = stack_idx >= 0 ? stack[stack_idx].operation : (skip_sub ? NGCFlowCtrl_Sub : NGCFlowCtrl_NoOp);
 
     switch(operation) {
 
@@ -300,7 +371,7 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
         case NGCFlowCtrl_EndWhile:
             if(hal.stream.file) {
                 if(last_op == NGCFlowCtrl_While) {
-                    if(o_label == stack[stack_idx].o_label) {
+                    if(!skipping && o_label == stack[stack_idx].o_label) {
                         uint_fast8_t pos = 0;
                         if(!stack[stack_idx].skip && (status = ngc_eval_expression(stack[stack_idx].expr, &pos, &value)) == Status_OK) {
                             if(!(stack[stack_idx].skip = value == 0))
@@ -309,7 +380,7 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
                         if(stack[stack_idx].skip)
                             stack_pull();
                     }
-                } else
+                } else if(!skipping)
                     status = Status_FlowControlSyntaxError;
             } else
                 status = Status_FlowControlNotExecutingMacro;
@@ -334,12 +405,12 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
             if(hal.stream.file) {
                 if(last_op == NGCFlowCtrl_Repeat) {
                     if(o_label == stack[stack_idx].o_label) {
-                        if(stack[stack_idx].repeats && --stack[stack_idx].repeats)
+                        if(!skipping && stack[stack_idx].repeats && --stack[stack_idx].repeats)
                             vfs_seek(stack[stack_idx].file, stack[stack_idx].file_pos);
                         else
                             stack_pull();
                     }
-                } else
+                } else if(!skipping)
                     status = Status_FlowControlSyntaxError;
             } else
                 status = Status_FlowControlNotExecutingMacro;
@@ -416,17 +487,114 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
                 status = (status_code_t)value;
             break;
 
+        case NGCFlowCtrl_Sub:
+            if(hal.stream.file) {
+                ngc_sub_t *sub;
+                if((skip_sub = (sub = malloc(sizeof(ngc_sub_t))) != NULL)) {
+                    sub->o_label = o_label;
+                    sub->file = hal.stream.file;
+                    sub->file_pos = vfs_tell(hal.stream.file);
+                    sub->next = NULL;
+                    if(subs == NULL)
+                        subs = sub;
+                    else {
+                        ngc_sub_t *last = subs;
+                        while(last->next)
+                            last = last->next;
+                        last->next = sub;
+                    }
+                } // else out of memory
+            } else
+                status = Status_FlowControlNotExecutingMacro;
+            break;
+
+        case NGCFlowCtrl_EndSub:
+            if(hal.stream.file) {
+                if(!skip_sub) {
+                    stack_unwind_sub(o_label);
+                    if(ngc_eval_expression(line, pos, &value) == Status_OK) {
+                        ngc_named_param_set("_value", value);
+                        ngc_named_param_set("_value_returned", 1.0f);
+                    } else
+                        ngc_named_param_set("_value_returned", 0.0f);
+                }
+                skip_sub = false;
+            } else
+                status = Status_FlowControlNotExecutingMacro;
+            break;
+
+        case NGCFlowCtrl_Call:
+            if(hal.stream.file) {
+                if(!skipping) {
+
+                    ngc_sub_t *sub = subs;
+                    do {
+                        if(sub->o_label == o_label && sub->file == hal.stream.file)
+                            break;
+                    } while((sub = sub->next));
+
+                    if(sub == NULL)
+                        status = Status_FlowControlSyntaxError;
+                    else {
+
+                        float params[30];
+                        ngc_param_id_t param_id = 1;
+
+                        while(line[*pos] && status == Status_OK && param_id <= 30) {
+                            status = ngc_eval_expression(line, pos, &params[param_id - 1]);
+                            param_id++;
+                        }
+
+                        if(status == Status_OK && param_id < 30) do {
+                            ngc_param_get(param_id, &params[param_id - 1]);
+                        } while(++param_id <= 30);
+
+                        if(status == Status_OK && (status = stack_push(o_label, operation)) == Status_OK) {
+
+                            stack[stack_idx].sub = exec_sub = sub;
+                            stack[stack_idx].file = hal.stream.file;
+                            stack[stack_idx].file_pos = vfs_tell(hal.stream.file);
+                            stack[stack_idx].repeats = 1;
+
+                            for(param_id = 1; param_id <= 30; param_id++) {
+                                if(params[param_id - 1] != 0.0f) {
+                                    if(!ngc_param_set(param_id, params[param_id - 1]))
+                                        status = Status_FlowControlOutOfMemory;
+                                }
+                            }
+
+                            if(status == Status_OK) {
+                                ngc_named_param_set("_value", 0.0f);
+                                ngc_named_param_set("_value_returned", 0.0f);
+                                vfs_seek(sub->file, sub->file_pos);
+                            }
+                        }
+                    }
+                }
+            } else
+                status = Status_FlowControlNotExecutingMacro;
+            break;
+
         case NGCFlowCtrl_Return:
-            if(!skipping && grbl.on_macro_return) {
-                vfs_file_t *file = stack[stack_idx].file;
-                while(stack_idx >= 0 && file == stack[stack_idx].file)
-                    stack_pull();
-                if(ngc_eval_expression(line, pos, &value) == Status_OK) {
-                    ngc_named_param_set("_value", value);
-                    ngc_named_param_set("_value_returned", 1.0f);
-                } else
-                    ngc_named_param_set("_value_returned", 0.0f);
-                grbl.on_macro_return();
+            if(hal.stream.file) {
+                if(!skipping) {
+
+                    bool g65_return = false;
+
+                    if(exec_sub)
+                        stack_unwind_sub(o_label);
+                    else if((g65_return = !!grbl.on_macro_return))
+                        ngc_flowctrl_unwind_stack(stack[stack_idx].file);
+
+                    if(ngc_eval_expression(line, pos, &value) == Status_OK) {
+                        ngc_named_param_set("_value", value);
+                        ngc_named_param_set("_value_returned", 1.0f);
+                    } else
+                        ngc_named_param_set("_value_returned", 0.0f);
+
+                    if(g65_return)
+                        grbl.on_macro_return();
+                }
             } else
                 status = Status_FlowControlNotExecutingMacro;
             break;
@@ -438,8 +606,10 @@ status_code_t ngc_flowctrl (uint32_t o_label, char *line, uint_fast8_t *pos, boo
     if(status != Status_OK) {
         ngc_flowctrl_init();
         *skip = false;
+        if(settings.flags.ngc_debug_out)
+            report_message(line, Message_Plain);
     } else
-        *skip = stack_idx >= 0 && stack[stack_idx].skip;
+        *skip = skip_sub || (stack_idx >= 0 && stack[stack_idx].skip);
 
     return status;
 }

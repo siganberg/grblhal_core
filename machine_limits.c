@@ -3,22 +3,22 @@
 
   Part of grblHAL
 
-  Copyright (c) 2017-2023 Terje Io
+  Copyright (c) 2017-2024 Terje Io
   Copyright (c) 2012-2016 Sungeun K. Jeon for Gnea Research LLC
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <math.h>
@@ -82,10 +82,15 @@ ISR_CODE static axes_signals_t ISR_FUNC(homing_signals_select)(home_signals_t si
 ISR_CODE void ISR_FUNC(limit_interrupt_handler)(limit_signals_t state) // DEFAULT: Limit pin change interrupt process.
 {
     // Ignore limit switches if already in an alarm state or in-process of executing an alarm.
-    // When in the alarm state, Grbl should have been reset or will force a reset, so any pending
+    // When in the alarm state, grblHAL should have been reset or will force a reset, so any pending
     // moves in the planner and stream input buffers are all cleared and newly sent blocks will be
     // locked out until a homing cycle or a kill lock command. Allows the user to disable the hard
     // limit setting if their limits are constantly triggering after a reset and move their axes.
+
+#if N_AXIS > 3
+    if((limit_signals_merge(state).value & sys.hard_limits.mask) == 0)
+        return;
+#endif
 
     memcpy(&sys.last_event.limits, &state, sizeof(limit_signals_t));
 
@@ -139,7 +144,7 @@ void limits_set_work_envelope (void)
 void limits_set_machine_positions (axes_signals_t cycle, bool add_pulloff)
 {
     uint_fast8_t idx = N_AXIS;
-    float pulloff = add_pulloff ? settings.homing.pulloff : 0.0f;
+    float pulloff = add_pulloff ? settings.homing.pulloff : -0.0f;
 
     if(settings.homing.flags.force_set_origin) {
         do {
@@ -268,6 +273,7 @@ static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_square)
     squaring_mode_t squaring_mode = SquaringMode_Both;
     coord_data_t target;
     plan_line_data_t plan_data;
+    rt_exec_t rt_exec, rt_exec_states = EXEC_SAFETY_DOOR|EXEC_RESET|EXEC_CYCLE_COMPLETE;
 
     plan_data_init(&plan_data);
     plan_data.condition.system_motion = On;
@@ -291,7 +297,7 @@ static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_square)
         // NOTE: settings.axis[].max_travel is stored as a negative value.
         if(bit_istrue(cycle.mask, bit(idx))) {
 #if N_AXIS > 3
-            if(bit_istrue(settings.steppers.is_rotational.mask, bit(idx)))
+            if(bit_istrue(settings.steppers.is_rotary.mask, bit(idx)))
                 max_travel = max(max_travel, (-HOMING_AXIS_SEARCH_SCALAR) * (settings.axis[idx].max_travel < -0.0f ? settings.axis[idx].max_travel : -360.0f));
             else
 #endif
@@ -314,6 +320,9 @@ static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_square)
         fail_distance = max(fail_distance, settings.homing.dual_axis.fail_distance_min);
         autosquare_fail_distance = truncf(fail_distance * settings.axis[dual_motor_axis].steps_per_mm);
     }
+
+    if(settings.status_report.when_homing)
+        rt_exec_states |= EXEC_STATUS_REPORT;
 
     // Set search mode with approach at seek rate to quickly engage the specified cycle.mask limit switches.
     do {
@@ -415,36 +424,40 @@ static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_square)
             st_prep_buffer(); // Check and prep segment buffer.
 
             // Exit routines: No time to run protocol_execute_realtime() in this loop.
-            if (sys.rt_exec_state & (EXEC_SAFETY_DOOR | EXEC_RESET | EXEC_CYCLE_COMPLETE)) {
+            if((rt_exec = (sys.rt_exec_state & rt_exec_states))) {
 
-                uint_fast16_t rt_exec = sys.rt_exec_state;
-
-                // Homing failure condition: Reset issued during cycle.
-                if (rt_exec & EXEC_RESET)
-                    system_set_exec_alarm(Alarm_HomingFailReset);
-
-                // Homing failure condition: Safety door was opened.
-                if (rt_exec & EXEC_SAFETY_DOOR)
-                    system_set_exec_alarm(Alarm_HomingFailDoor);
-
-                hal.delay_ms(2, NULL);
-
-                // Homing failure condition: Homing switch(es) still engaged after pull-off motion
-                if (mode == HomingMode_Pulloff && (homing_signals_select(hal.homing.get_state(), (axes_signals_t){0}, SquaringMode_Both).mask & cycle.mask))
-                    system_set_exec_alarm(Alarm_FailPulloff);
-
-                // Homing failure condition: Limit switch not found during approach.
-                if (mode != HomingMode_Pulloff && (rt_exec & EXEC_CYCLE_COMPLETE))
-                    system_set_exec_alarm(Alarm_HomingFailApproach);
-
-                if (sys.rt_exec_alarm) {
-                    mc_reset(); // Stop motors, if they are running.
-                    protocol_execute_realtime();
-                    return false;
+                if(rt_exec == EXEC_STATUS_REPORT) {
+                    system_clear_exec_state_flag(EXEC_STATUS_REPORT);
+                    report_realtime_status();
                 } else {
-                    // Pull-off motion complete. Disable CYCLE_STOP from executing.
-                    system_clear_exec_state_flag(EXEC_CYCLE_COMPLETE);
-                    break;
+
+                    // Homing failure condition: Reset issued during cycle.
+                    if (rt_exec & EXEC_RESET)
+                        system_set_exec_alarm(Alarm_HomingFailReset);
+
+                    // Homing failure condition: Safety door was opened.
+                    if (rt_exec & EXEC_SAFETY_DOOR)
+                        system_set_exec_alarm(Alarm_HomingFailDoor);
+
+                    hal.delay_ms(2, NULL);
+
+                    // Homing failure condition: Homing switch(es) still engaged after pull-off motion
+                    if (mode == HomingMode_Pulloff && (homing_signals_select(hal.homing.get_state(), (axes_signals_t){0}, SquaringMode_Both).mask & cycle.mask))
+                        system_set_exec_alarm(Alarm_FailPulloff);
+
+                    // Homing failure condition: Limit switch not found during approach.
+                    if (mode != HomingMode_Pulloff && (rt_exec & EXEC_CYCLE_COMPLETE))
+                        system_set_exec_alarm(Alarm_HomingFailApproach);
+
+                    if (sys.rt_exec_alarm) {
+                        mc_reset(); // Stop motors, if they are running.
+                        protocol_execute_realtime();
+                        return false;
+                    } else {
+                        // Pull-off motion complete. Disable CYCLE_STOP from executing.
+                        system_clear_exec_state_flag(EXEC_CYCLE_COMPLETE);
+                        break;
+                    }
                 }
             }
 
@@ -485,7 +498,7 @@ static bool homing_cycle (axes_signals_t cycle, axes_signals_t auto_square)
     }
 
     // The active cycle axes should now be homed and machine limits have been located. By
-    // default, Grbl defines machine space as all negative, as do most CNCs. Since limit switches
+    // default, grblHAL defines machine space as all negative, as do most CNCs. Since limit switches
     // can be on either side of an axes, check and set axes machine zero appropriately. Also,
     // set up pull-off maneuver from axes limit switches that have been homed. This provides
     // some initial clearance off the switches and should also help prevent them from falsely
@@ -533,8 +546,6 @@ status_code_t limits_go_home (axes_signals_t cycle)
         if((auto_squared.mask & homing_signals_select(hal.homing.get_state(), (axes_signals_t){0}, SquaringMode_Both).mask) && !limits_pull_off(auto_square, settings.homing.pulloff * HOMING_AXIS_LOCATE_SCALAR))
             return Status_LimitsEngaged; // Auto squaring with limit switch asserted is not allowed.
     }
-
-    tc_clear_tlo_reference(cycle);
 
     return grbl.home_machine(cycle, auto_square) ? Status_OK : Status_Unhandled;
 }

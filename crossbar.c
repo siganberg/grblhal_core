@@ -3,20 +3,20 @@
 
   Part of grblHAL
 
-  Copyright (c) 2023 Terje Io
+  Copyright (c) 2023-2024 Terje Io
 
-  Grbl is free software: you can redistribute it and/or modify
+  grblHAL is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or
   (at your option) any later version.
 
-  Grbl is distributed in the hope that it will be useful,
+  grblHAL is distributed in the hope that it will be useful,
   but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
   GNU General Public License for more details.
 
   You should have received a copy of the GNU General Public License
-  along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
+  along with grblHAL. If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "hal.h"
@@ -126,4 +126,26 @@ limit_signals_t xbar_get_homing_source_from_cycle (axes_signals_t homing_cycle)
     }
 
     return source;
+}
+
+const char *xbar_fn_to_pinname (pin_function_t fn)
+{
+    const char *name = NULL;
+    uint_fast8_t idx = sizeof(pin_names) / sizeof(pin_name_t);
+
+    do {
+        if(pin_names[--idx].function == fn)
+            name = pin_names[idx].name;
+    } while(idx && !name);
+
+    return name ? name : "N/A";
+}
+
+control_signals_t xbar_fn_to_signals_mask (pin_function_t fn)
+{
+    control_signals_t signals;
+
+    signals.mask = fn >= Input_Probe ? 0 : 1 << (uint32_t)fn;
+
+    return signals;
 }
