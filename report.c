@@ -2557,6 +2557,26 @@ static bool report_spindle (spindle_info_t *spindle, void *data)
                 hal.stream.write(", active");
  #endif
 #endif
+             //add capability flags
+            hal.stream.write(", ");
+            if(spindle->hal->cap.at_speed)
+                hal.stream.write("S");
+            if(spindle->hal->cap.direction)
+                hal.stream.write("D");
+            if(spindle->hal->cap.laser)
+                hal.stream.write("L");
+            if(spindle->hal->cap.pid)
+                hal.stream.write("P");
+            if(spindle->hal->cap.pwm_invert)
+                hal.stream.write("I");    
+            if(spindle->hal->cap.pwm_linearization)
+                hal.stream.write("N");
+            if(spindle->hal->cap.rpm_range_locked)
+                hal.stream.write("R"); 
+            if(spindle->hal->cap.variable)
+                hal.stream.write("V");
+            if(spindle->is_current)
+                hal.stream.write(", current");
         }
         hal.stream.write(ASCII_EOL);
     }
