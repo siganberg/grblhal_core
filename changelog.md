@@ -1,10 +1,66 @@
 ## grblHAL changelog
 
+<a name="20250102">20250102
+
+Core:
+
+* Fix for coolant issue when resetting from feed hold state. Ref. STMF32F4xx issue [#205](https://github.com/grblHAL/STM32F4xx/issues/205).
+
+Drivers:
+
+* STM32F4xx, STM32F7xx: some minor fixes.
+
+Plugins:
+
+* Spindle: fix for alarm 14 beeing raised on reset. Ref. STMF32F4xx issue [#205](https://github.com/grblHAL/STM32F4xx/issues/205).  
+Added retry handling to Modbus RTU driver, updated VFD spindle drivers accordingly. 
+
+---
+
+<a name="20250101">20250101
+
+Drivers: 
+
+* ESP32: fixed regression causing compiler failure if Bluetooth is enabled.
+
+* iMXRT1062: fixed regression causing compiler failure if laser PPI plugin is enabled.
+
+* STM32F1xx, STM32F4xx: updates for Web Builder.
+
+Plugins:
+
+* Laser, PPI: added disable of PPI mode on program end \(`M2`, `M30`\) and soft reset.
+
+---
+
+<a name="20241226">Build 20241230
+
+Core:
+
+* Fix for laser incorrectly enabled in laser mode when `M3S<n>` commanded in `G0` and `G80` modal states. Ref. issue [#644](https://github.com/grblHAL/core/issues/644).
+
+* Added support for 3rd order acceleration \(jerk\) and G187 gcode. Ref. pull request [#593](https://github.com/grblHAL/core/pull/593).
+
+Drivers:
+
+* STM32F4xx: updated ST framework to latest version, added support for ethernet via DP83848 PHY.
+
+* STM32F4xx, STM32F7xx: improved SD card mount/dismount handling and added support for card detect signal.  
+Now flags RTC as set if date >= grblHAL build date.
+
+* LPC176x: added function required for Modbus support. Renamed bootloader build option to avoid confusion.
+
+Plugins:
+
+* SD card: improved mount/dismount handling.
+
+---
+
 <a name="20241226">20241226
 
 Drivers:
 
-* STM32F4xx: fix for not enabling steppers after clearing E-stop alarm. Ref. issue [#203](https://github.com/grblHAL/STM32F4xx/issues/203).
+* STM32F4xx: SuperLongBoard - fix for not enabling steppers after clearing E-stop alarm. Ref. issue [#203](https://github.com/grblHAL/STM32F4xx/issues/203).
 
 Plugins:
 
