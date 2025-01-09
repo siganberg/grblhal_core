@@ -1,6 +1,89 @@
 ## grblHAL changelog
 
-<a name="20250102">20250102
+<a name="20250109">Build 20250109
+
+Core:
+
+* Fixed inconsistent handling of auxiliary port numbers when claiming from plugins. New API call added related to this.
+
+* Added `ffs()` library function for `_WIN32` platform. Fixes issue [#655](https://github.com/grblHAL/core/issues/655).
+
+Drivers:
+
+* ESP32: added tentative support for Trinamic SPI driver configurations with individual chip select signals. Ref. issue [#133](https://github.com/grblHAL/ESP32/issues/133).
+
+* STM32F4xx: updated LongBoard32 definitions to use explicit auxilary pin mappings for keypad macros. Ref. issue [#207](https://github.com/grblHAL/STM32F4xx/issues/207).
+
+Plugins:
+
+* Bluetooth, Embroidery and Keypad, macros: updated to use new core functionality for claiming auxiliary pins.
+
+---
+
+<a name="20250107">Build 20250107
+
+Core:
+
+* Added setting `$539` for spindle spin down delay. Ref. issue [#651](https://github.com/grblHAL/core/issues/651).
+
+Drivers:
+
+* RP2040, STM32F4xx and STM32F7xx: increased reset delay for WizNet ethernet modules.
+
+* iMXRT1062, STM32F4xx and STM32F7xx: fixed regression affecting step injection, used when stepper spindle or plasma THC is enabled.
+
+* STM32F7xx: removed code left over from copy/paste update. Ref. issue [#20](https://github.com/grblHAL/STM32F7xx/issues/20).
+
+Plugins:
+
+* Spindle, stepper: improved settings changes handling. Added a bit of documentation. Ref. issue [#30](https://github.com/grblHAL/Plugins_spindle/issues/30).
+
+* SD card: added inbuilt macro `G65P4` for getting the [current machine state](https://github.com/grblHAL/core/wiki/Expressions-and-flow-control#inbuilt-g65-macros).
+
+---
+
+<a name="20250104">Build 20250104
+
+Core:
+
+* Changed error code reported when file not found for named `O`-sub calls from `39` to `84`.
+
+* Added event handler for outputting welcome message on "native" USB connect for drivers that provides the linestate changed event. Ref. STMF32F4xx issue [#206](https://github.com/grblHAL/STM32F4xx/issues/206). 
+
+Drivers:
+
+* LPC176x: added support for USB linestate changed event.
+
+* iMXRT1062: now outputs the welcome message on the first USB connection after a cold start.
+
+Plugins:
+
+* Bluetooth: updated for core change.
+
+* SD card: changed error code reported when file not found for `G65` macro calls from `39` to `84`.  
+Removed `IDLE` state requirement for executing `G65` macros, an error will no longer be returned and the macro will be run.  
+
+---
+
+<a name="20250103">Build 20250103
+
+Core:
+
+* Added new handling for spindle spin up and coolant start delays. Setting `$394` is for spindle spin up and `$673` for coolant start.  
+They can be either set to 0 or to a value in the range 0.5 - 20s. The settings are used both for initial delay and for restore delay after cancelling a feed hold or completing a tool change.  
+> [!NOTE]
+> If the spindle supports "at speed" functionality and this is enabled by setting `$340` \(Spindle at speed tolerance\) > 0 then the spin up delay is used as a timeout value before alarm 14 is raised. If `$394` is set to 0 the timeout will default to one minute.
+
+> [!NOTE]
+> Settings `$392` and `$393`, if available, are now only used for spindle spin up delay and coolant start delay respectively when the safety door is closed.
+
+Plugins:
+
+* Laser, coolant: updated for internal naming changes, no functional changes.
+
+---
+
+<a name="20250102">Build 20250102
 
 Core:
 
